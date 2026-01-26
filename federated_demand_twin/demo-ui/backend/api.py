@@ -1284,6 +1284,616 @@ async def get_agent_output_page_data():
     }
 
 
+# ============================================================================
+# DEMAND & PROCUREMENT ENDPOINTS
+# ============================================================================
+
+# D&P Global state
+dp_state = {
+    "orchestrator": None,
+    "decision_pack": None,
+    "logs": [],
+    "status": "idle",
+    "progress": 0,
+    "current_step": "",
+    "config": None,
+}
+
+
+def get_dp_sku_configs():
+    """Get D&P SKU configurations"""
+    from vendor.agents.ecosystems.demand_procurement.schemas import ServiceLevel
+    return [
+        {"sku_id": "SKU-001", "sku_name": "Widget A", "category": "Widgets", "unit_cost": 25.0, "lead_time_days": 7, "current_inventory": 500, "service_level": ServiceLevel.SILVER},
+        {"sku_id": "SKU-002", "sku_name": "Widget B", "category": "Widgets", "unit_cost": 45.0, "lead_time_days": 10, "current_inventory": 300, "service_level": ServiceLevel.SILVER},
+        {"sku_id": "SKU-003", "sku_name": "Gadget X", "category": "Gadgets", "unit_cost": 120.0, "lead_time_days": 14, "current_inventory": 150, "service_level": ServiceLevel.GOLD},
+        {"sku_id": "SKU-004", "sku_name": "Gadget Y", "category": "Gadgets", "unit_cost": 85.0, "lead_time_days": 12, "current_inventory": 200, "service_level": ServiceLevel.SILVER},
+        {"sku_id": "SKU-005", "sku_name": "Component Z", "category": "Components", "unit_cost": 15.0, "lead_time_days": 5, "current_inventory": 1000, "service_level": ServiceLevel.BRONZE},
+    ]
+
+
+def get_dp_supplier_configs():
+    """Get D&P supplier configurations"""
+    from vendor.agents.ecosystems.demand_procurement.schemas import SupplierTier
+    return [
+        {"supplier_id": "SUP-001", "supplier_name": "Acme Supplies", "tier": SupplierTier.STRATEGIC, "avg_lead_time_days": 7, "sku_ids": ["SKU-001", "SKU-002"], "on_time_delivery_rate": 0.95, "quality_score": 0.92},
+        {"supplier_id": "SUP-002", "supplier_name": "Global Parts", "tier": SupplierTier.PREFERRED, "avg_lead_time_days": 14, "sku_ids": ["SKU-003", "SKU-004"], "on_time_delivery_rate": 0.88, "quality_score": 0.90},
+        {"supplier_id": "SUP-003", "supplier_name": "Quick Components", "tier": SupplierTier.APPROVED, "avg_lead_time_days": 5, "sku_ids": ["SKU-005"], "on_time_delivery_rate": 0.92, "quality_score": 0.85},
+    ]
+
+
+@app.get("/api/dp/status")
+async def get_dp_status():
+    """Get D&P demo status"""
+    return {
+        "status": dp_state["status"],
+        "progress": dp_state["progress"],
+        "current_step": dp_state["current_step"],
+        "has_results": dp_state["decision_pack"] is not None
+    }
+
+
+@app.get("/api/dp/logs")
+async def get_dp_logs():
+    """Get D&P logs"""
+    return {"logs": dp_state["logs"]}
+
+
+@app.get("/api/dp/config")
+async def get_dp_config():
+    """Get D&P configuration"""
+    skus = get_dp_sku_configs()
+    suppliers = get_dp_supplier_configs()
+    return {
+        "organization_id": "demo-org",
+        "organization_name": "Demo Organization",
+        "skus": [{"sku_id": s["sku_id"], "sku_name": s["sku_name"], "category": s["category"], "unit_cost": s["unit_cost"], "lead_time_days": s["lead_time_days"], "current_inventory": s["current_inventory"], "service_level": str(s["service_level"].value)} for s in skus],
+        "suppliers": [{"supplier_id": s["supplier_id"], "supplier_name": s["supplier_name"], "tier": str(s["tier"].value), "avg_lead_time_days": s["avg_lead_time_days"], "sku_ids": s["sku_ids"]} for s in suppliers],
+        "forecast_horizon_weeks": 13,
+        "working_capital_limit": 500000
+    }
+
+
+@app.post("/api/dp/demo/run")
+async def run_dp_demo():
+    """Run the D&P demo pipeline"""
+    global dp_state
+    
+    if dp_state["status"] == "running":
+        raise HTTPException(status_code=400, detail="D&P Demo is already running")
+    
+    dp_state["status"] = "running"
+    dp_state["progress"] = 0
+    dp_state["logs"] = []
+    
+    def add_log(message: str, level: str = "info"):
+        dp_state["logs"].append({
+            "timestamp": datetime.now().isoformat(),
+            "level": level,
+            "message": message
+        })
+    
+    try:
+        from vendor.agents.ecosystems.demand_procurement import (
+            create_demand_procurement_orchestrator,
+            SKUConfig, SupplierConfig, ServiceLevel, SupplierTier
+        )
+        
+        add_log("📦 DEMAND & PROCUREMENT OPTIMIZATION DEMO", "header")
+        add_log("Forecast → Optimize → Risk → Simulate → Plan → Govern → Report Pipeline")
+        dp_state["current_step"] = "Initializing orchestrator"
+        dp_state["progress"] = 5
+        
+        # Get configs
+        sku_configs = get_dp_sku_configs()
+        supplier_configs = get_dp_supplier_configs()
+        
+        add_log("\n--- SKU Configuration ---")
+        for sku in sku_configs:
+            add_log(f"  ✓ {sku['sku_name']} ({sku['sku_id']}): ${sku['unit_cost']:.2f}, LT={sku['lead_time_days']}d, Inv={sku['current_inventory']}")
+        dp_state["progress"] = 15
+        
+        add_log("\n--- Supplier Configuration ---")
+        for sup in supplier_configs:
+            add_log(f"  ✓ {sup['supplier_name']} ({sup['tier'].value}): LT={sup['avg_lead_time_days']}d, OTD={sup['on_time_delivery_rate']:.0%}")
+        dp_state["progress"] = 25
+        
+        # Create orchestrator
+        dp_state["current_step"] = "Creating D&P orchestrator"
+        add_log("\n--- Initializing D&P Orchestrator ---")
+        
+        orchestrator = create_demand_procurement_orchestrator(
+            organization_id="demo-org",
+            organization_name="Demo Organization",
+            skus=sku_configs,
+            suppliers=supplier_configs,
+            forecast_horizon_weeks=13,
+            working_capital_limit=500000
+        )
+        
+        dp_state["orchestrator"] = orchestrator
+        add_log(f"  ✓ Orchestrator initialized with {len(sku_configs)} SKUs, {len(supplier_configs)} suppliers")
+        dp_state["progress"] = 35
+        
+        # Generate demand history
+        dp_state["current_step"] = "Generating demand history"
+        add_log("\n--- Generating Historical Demand Data ---")
+        
+        np.random.seed(42)
+        demand_history = {}
+        for sku in sku_configs:
+            base_demand = 100 + np.random.uniform(-20, 50)
+            seasonality = np.sin(np.arange(52) * 2 * np.pi / 52) * 20
+            noise = np.random.normal(0, 10, 52)
+            demand_history[sku["sku_id"]] = np.maximum(10, base_demand + seasonality + noise)
+            add_log(f"  ✓ {sku['sku_id']}: 52 weeks history, avg={np.mean(demand_history[sku['sku_id']]):.0f}/week")
+        
+        dp_state["progress"] = 45
+        
+        # Set current inventory
+        current_inventory = {sku["sku_id"]: sku["current_inventory"] for sku in sku_configs}
+        
+        # Run the pipeline
+        dp_state["current_step"] = "Running D&P pipeline"
+        add_log("\n" + "=" * 60)
+        add_log("  RUNNING DEMAND & PROCUREMENT PIPELINE")
+        add_log("=" * 60)
+        
+        add_log("\nStep 1: Demand Forecasting...")
+        dp_state["progress"] = 50
+        
+        add_log("Step 2: Inventory Optimization...")
+        dp_state["progress"] = 60
+        
+        add_log("Step 3: Risk Assessment...")
+        dp_state["progress"] = 70
+        
+        add_log("Step 4: Scenario Simulation...")
+        dp_state["progress"] = 80
+        
+        # Run the actual pipeline
+        decision_pack = orchestrator.run(
+            demand_history=demand_history,
+            current_inventory=current_inventory
+        )
+        
+        dp_state["decision_pack"] = decision_pack
+        dp_state["progress"] = 90
+        
+        # Log results
+        dp_state["current_step"] = "Generating results"
+        add_log("\n" + "=" * 60)
+        add_log("  DECISION PACK RESULTS")
+        add_log("=" * 60)
+        
+        add_log(f"\nPack ID: {decision_pack.pack_id}")
+        add_log(f"Status: {decision_pack.status}")
+        add_log(f"Confidence: {decision_pack.confidence_score:.1%}")
+        
+        add_log("\n--- Forecasts ---")
+        for sku_id, forecast in decision_pack.forecasts.items():
+            add_log(f"  {sku_id}: Avg {forecast.mean_weekly_demand:.0f}/week, Total {forecast.total_forecast:.0f} (13wk)")
+        
+        add_log("\n--- Inventory Policies ---")
+        for sku_id, policy in decision_pack.policies.items():
+            add_log(f"  {sku_id}: ROP={policy.reorder_point}, EOQ={policy.order_quantity}, SS={policy.safety_stock}")
+        
+        add_log("\n--- Risk Assessments ---")
+        for sku_id, risk in decision_pack.risk_assessments.items():
+            add_log(f"  {sku_id}: {risk.risk_level.upper()} risk (stockout {risk.stockout_probability:.1%})")
+        
+        add_log("\n--- Procurement Plans ---")
+        for plan in decision_pack.procurement_plans[:5]:
+            add_log(f"  {plan.sku_id}: Order {plan.order_quantity} units from {plan.supplier_id} (P{plan.priority})")
+        
+        add_log("\n--- Scenario Results ---")
+        for scenario_id, result in decision_pack.scenario_results.items():
+            add_log(f"  {result.scenario_name}: SL={result.expected_service_level:.1%}, Cost=${result.expected_total_cost:,.0f}")
+        
+        add_log("\n--- Recommendations ---")
+        for rec in decision_pack.recommendations[:5]:
+            add_log(f"  [{rec['type']}] {rec['sku_id']}: {rec['action']} (P{rec['priority']})")
+        
+        add_log("\n" + "=" * 60)
+        add_log("  EXECUTIVE SUMMARY")
+        add_log("=" * 60)
+        add_log(decision_pack.executive_summary)
+        
+        dp_state["progress"] = 100
+        dp_state["status"] = "completed"
+        dp_state["current_step"] = "Demo complete"
+        add_log("\n✅ D&P Demo completed successfully!")
+        
+        return {
+            "status": "success",
+            "message": "D&P Demo completed successfully",
+            "pack_id": decision_pack.pack_id
+        }
+        
+    except Exception as e:
+        dp_state["status"] = "error"
+        dp_state["current_step"] = f"Error: {str(e)}"
+        add_log(f"❌ D&P Demo failed: {str(e)}", "error")
+        import traceback
+        add_log(traceback.format_exc(), "error")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/dp/ui/bayesian")
+async def get_dp_bayesian_page_data():
+    """Get D&P Bayesian page data"""
+    decision_pack = dp_state.get("decision_pack")
+    skus = get_dp_sku_configs()
+    
+    # Build predictions from forecasts
+    predictions = []
+    if decision_pack and decision_pack.forecasts:
+        for i, (sku_id, forecast) in enumerate(list(decision_pack.forecasts.items())[:4]):
+            sku = next((s for s in skus if s["sku_id"] == sku_id), None)
+            predictions.append({
+                "id": f"pred-{i+1}",
+                "timestamp": datetime.now().isoformat(),
+                "metric": f"{sku['sku_name'] if sku else sku_id} Demand",
+                "predictedValue": forecast.mean_weekly_demand,
+                "confidenceInterval": [forecast.q10[0] if forecast.q10 else forecast.mean_weekly_demand * 0.8, forecast.q90[0] if forecast.q90 else forecast.mean_weekly_demand * 1.2],
+                "probability": 0.85,
+                "priorMean": forecast.mean_weekly_demand * 0.9,
+                "posteriorMean": forecast.mean_weekly_demand,
+                "uncertainty": forecast.std_weekly_demand,
+            })
+    else:
+        for i, sku in enumerate(skus[:4]):
+            predictions.append({
+                "id": f"pred-{i+1}",
+                "timestamp": datetime.now().isoformat(),
+                "metric": f"{sku['sku_name']} Demand",
+                "predictedValue": 100,
+                "confidenceInterval": [80, 120],
+                "probability": 0.5,
+                "priorMean": 100,
+                "posteriorMean": 100,
+                "uncertainty": 20,
+            })
+    
+    # Model parameters
+    parameters = [
+        {"name": "μ (Base Demand)", "prior": 100, "posterior": 110 if decision_pack else 100, "credibleInterval": [90, 130]},
+        {"name": "σ (Demand Std)", "prior": 25, "posterior": 22 if decision_pack else 25, "credibleInterval": [18, 32]},
+        {"name": "LT (Lead Time)", "prior": 10, "posterior": 9 if decision_pack else 10, "credibleInterval": [7, 14]},
+        {"name": "SL (Service Level)", "prior": 0.95, "posterior": 0.96 if decision_pack else 0.95, "credibleInterval": [0.92, 0.98]},
+    ]
+    
+    # Federated nodes (SKU categories)
+    categories = list(set(s["category"] for s in skus))
+    nodes = []
+    for i, cat in enumerate(categories):
+        cat_skus = [s for s in skus if s["category"] == cat]
+        nodes.append({
+            "id": f"node-{i+1}",
+            "name": cat,
+            "location": f"{len(cat_skus)} SKUs",
+            "status": "active" if decision_pack else "offline",
+            "lastSync": f"{np.random.randint(1, 5)} min ago" if decision_pack else "Never",
+            "localSamples": len(cat_skus) * 52 * 4,
+            "contribution": round(len(cat_skus) / len(skus), 2)
+        })
+    
+    # Convergence data
+    convergence = []
+    for iteration in range(0, 801, 100):
+        progress = iteration / 700
+        posterior = 100 + 10 * min(1.0, progress * 1.2)
+        uncertainty = 25 * (1 - progress * 0.3)
+        convergence.append({
+            "iteration": iteration,
+            "prior": 100,
+            "posterior": round(posterior, 1),
+            "lower": round(posterior - uncertainty, 1),
+            "upper": round(posterior + uncertainty, 1)
+        })
+    
+    return {
+        "bayesianPredictions": predictions,
+        "modelParameters": parameters,
+        "federatedNodes": nodes,
+        "posteriorConvergenceData": convergence,
+        "aggregationSummary": {
+            "totalSamples": sum(n["localSamples"] for n in nodes),
+            "activeNodes": len([n for n in nodes if n["status"] == "active"]),
+            "syncRounds": 12 if decision_pack else 0,
+            "modelUncertainty": decision_pack.confidence_score if decision_pack else 0.5
+        }
+    }
+
+
+@app.get("/api/dp/ui/digital-twin")
+async def get_dp_digital_twin_page_data():
+    """Get D&P Digital Twin page data"""
+    decision_pack = dp_state.get("decision_pack")
+    skus = get_dp_sku_configs()
+    
+    # Build devices from SKUs
+    devices = []
+    for i, sku in enumerate(skus[:4]):
+        inventory = sku["current_inventory"]
+        demand = 100
+        if decision_pack and sku["sku_id"] in decision_pack.forecasts:
+            demand = decision_pack.forecasts[sku["sku_id"]].mean_weekly_demand
+        
+        weeks_supply = inventory / demand if demand > 0 else 0
+        risk_level = "normal"
+        if decision_pack and sku["sku_id"] in decision_pack.risk_assessments:
+            risk_level = decision_pack.risk_assessments[sku["sku_id"]].risk_level
+        
+        status = "normal" if risk_level == "low" else ("warning" if risk_level in ["medium", "high"] else "critical")
+        
+        devices.append({
+            "id": sku["sku_id"],
+            "name": sku["sku_name"],
+            "type": "sensor",
+            "status": status,
+            "location": f"{sku['category']}, LT={sku['lead_time_days']}d",
+            "lastUpdate": f"{np.random.randint(5, 30)} sec ago",
+            "metrics": [
+                {"name": "On Hand", "value": inventory, "unit": "units", "trend": "stable"},
+                {"name": "Weekly Demand", "value": round(demand), "unit": "units/wk", "trend": "up" if np.random.random() > 0.5 else "stable"},
+                {"name": "Weeks of Supply", "value": round(weeks_supply, 1), "unit": "weeks", "trend": "down" if weeks_supply < 3 else "stable"},
+            ]
+        })
+    
+    # Activities
+    activities = []
+    for i, log in enumerate(dp_state.get("logs", [])[-6:]):
+        msg = log.get("message", "")
+        if any(kw in msg.lower() for kw in ["inventory", "demand", "sku", "forecast", "risk"]):
+            activities.append({
+                "id": f"act-{i+1}",
+                "timestamp": log.get("timestamp", "")[-8:],
+                "type": "telemetry",
+                "deviceId": "system",
+                "message": msg[:80],
+                "severity": "info"
+            })
+    
+    if not activities:
+        activities = [
+            {"id": "act-1", "timestamp": datetime.now().strftime("%H:%M:%S"), "type": "telemetry", "deviceId": "system", "message": "Awaiting demo run", "severity": "info"},
+        ]
+    
+    # Telemetry history
+    telemetry = []
+    for week in range(13):
+        base_inv = 800 - week * 40
+        demand_var = np.sin(week / 2) * 50
+        telemetry.append({
+            "time": f"Week {week + 1}",
+            "inventory": int(max(200, base_inv + demand_var)),
+            "demand": int(100 + np.random.uniform(-15, 25)),
+            "threshold_inventory": 300
+        })
+    
+    return {
+        "devices": devices,
+        "twinActivities": activities,
+        "telemetryHistory": telemetry
+    }
+
+
+@app.get("/api/dp/ui/orchestration")
+async def get_dp_orchestration_page_data():
+    """Get D&P Orchestration page data"""
+    decision_pack = dp_state.get("decision_pack")
+    
+    # D&P Pipeline agents
+    agents = [
+        {"id": "agent-1", "name": "Demand Forecaster", "role": "Probabilistic Forecasting", "status": "completed" if decision_pack else "idle", "avatar": "📊", "description": "Generates probabilistic demand forecasts"},
+        {"id": "agent-2", "name": "Inventory Optimizer", "role": "Policy Optimization", "status": "completed" if decision_pack else "idle", "avatar": "📦", "description": "Computes ROP, EOQ, safety stock"},
+        {"id": "agent-3", "name": "Supplier Manager", "role": "Supplier Selection", "status": "completed" if decision_pack else "idle", "avatar": "🤝", "description": "Manages supplier relationships"},
+        {"id": "agent-4", "name": "Risk Analyst", "role": "Risk Assessment", "status": "completed" if decision_pack else "idle", "avatar": "⚠️", "description": "Analyzes stockout and overstock risks"},
+        {"id": "agent-5", "name": "Scenario Simulator", "role": "Monte Carlo Simulation", "status": "completed" if decision_pack else "idle", "avatar": "🔮", "description": "Runs what-if scenarios"},
+        {"id": "agent-6", "name": "Procurement Planner", "role": "Plan Generation", "status": "completed" if decision_pack else "idle", "avatar": "📋", "description": "Generates procurement plans"},
+        {"id": "agent-7", "name": "Governance Agent", "role": "Policy Validation", "status": "completed" if decision_pack else "idle", "avatar": "🛡️", "description": "Validates against business rules"},
+        {"id": "agent-8", "name": "Report Writer", "role": "Decision Pack", "status": "completed" if decision_pack else "idle", "avatar": "📝", "description": "Generates decision packs"},
+    ]
+    
+    # Pipeline steps
+    steps = [
+        {"id": "step-1", "name": "Forecast", "agents": ["Demand Forecaster"], "status": "completed" if decision_pack else "pending"},
+        {"id": "step-2", "name": "Optimize", "agents": ["Inventory Optimizer"], "status": "completed" if decision_pack else "pending"},
+        {"id": "step-3", "name": "Risk", "agents": ["Risk Analyst"], "status": "completed" if decision_pack else "pending"},
+        {"id": "step-4", "name": "Simulate", "agents": ["Scenario Simulator"], "status": "completed" if decision_pack else "pending"},
+        {"id": "step-5", "name": "Plan", "agents": ["Procurement Planner"], "status": "completed" if decision_pack else "pending"},
+        {"id": "step-6", "name": "Govern", "agents": ["Governance Agent"], "status": "completed" if decision_pack else "pending"},
+        {"id": "step-7", "name": "Report", "agents": ["Report Writer"], "status": "completed" if decision_pack else "pending"},
+    ]
+    
+    # Agent actions
+    actions = []
+    if decision_pack:
+        actions = [
+            {"id": "action-1", "agentId": "agent-1", "agentName": "Demand Forecaster", "timestamp": datetime.now().strftime("%H:%M:%S"), "action": f"Generated forecasts for {len(decision_pack.forecasts)} SKUs", "target": "pipeline", "status": "completed", "duration": 150},
+            {"id": "action-2", "agentId": "agent-2", "agentName": "Inventory Optimizer", "timestamp": datetime.now().strftime("%H:%M:%S"), "action": f"Optimized policies for {len(decision_pack.policies)} SKUs", "target": "pipeline", "status": "completed", "duration": 200},
+            {"id": "action-3", "agentId": "agent-4", "agentName": "Risk Analyst", "timestamp": datetime.now().strftime("%H:%M:%S"), "action": f"Assessed risk for {len(decision_pack.risk_assessments)} SKUs", "target": "pipeline", "status": "completed", "duration": 120},
+            {"id": "action-4", "agentId": "agent-6", "agentName": "Procurement Planner", "timestamp": datetime.now().strftime("%H:%M:%S"), "action": f"Generated {len(decision_pack.procurement_plans)} procurement orders", "target": "pipeline", "status": "completed", "duration": 180},
+        ]
+    
+    # Current case
+    current_case = {
+        "id": decision_pack.pack_id if decision_pack else "PENDING",
+        "title": "Demand & Procurement Optimization",
+        "status": "complete" if decision_pack else "pending",
+        "priority": "high",
+        "createdAt": decision_pack.created_at.isoformat() if decision_pack else None,
+        "assignedAgents": [a["name"] for a in agents if a["status"] == "completed"],
+        "alerts": len([r for r in (decision_pack.risk_assessments.values() if decision_pack else []) if getattr(r, 'risk_level', 'low') in ["high", "critical"]]),
+        "hypotheses": len(decision_pack.scenario_results) if decision_pack else 0,
+        "totalBudget": 500000,
+        "confidence": decision_pack.confidence_score if decision_pack else 0
+    }
+    
+    # Governance
+    governance = {
+        "autonomyLevel": "AUTO_LOW_RISK" if decision_pack and decision_pack.status == "completed" else "PENDING",
+        "policyChecks": {"passed": 5 if decision_pack else 0, "total": 5},
+        "pendingApprovals": 0 if decision_pack and decision_pack.status == "completed" else 1,
+        "auditEntries": len(actions)
+    }
+    
+    return {
+        "agents": agents,
+        "agentActions": actions,
+        "orchestrationSteps": steps,
+        "currentCase": current_case,
+        "governance": governance
+    }
+
+
+@app.get("/api/dp/ui/agent-output")
+async def get_dp_agent_output_page_data():
+    """Get D&P Agent Output page data"""
+    decision_pack = dp_state.get("decision_pack")
+    
+    agents = [
+        {"id": "agent-1", "name": "Demand Forecaster", "role": "Probabilistic Forecasting", "status": "completed" if decision_pack else "idle", "avatar": "📊"},
+        {"id": "agent-2", "name": "Inventory Optimizer", "role": "Policy Optimization", "status": "completed" if decision_pack else "idle", "avatar": "📦"},
+        {"id": "agent-4", "name": "Risk Analyst", "role": "Risk Assessment", "status": "completed" if decision_pack else "idle", "avatar": "⚠️"},
+        {"id": "agent-6", "name": "Procurement Planner", "role": "Plan Generation", "status": "completed" if decision_pack else "idle", "avatar": "📋"},
+        {"id": "agent-8", "name": "Report Writer", "role": "Decision Pack", "status": "completed" if decision_pack else "idle", "avatar": "📝"},
+    ]
+    
+    outputs = []
+    
+    if decision_pack:
+        # Forecaster output
+        outputs.append({
+            "id": "output-1",
+            "agentId": "agent-1",
+            "agentName": "Demand Forecaster",
+            "timestamp": datetime.now().strftime("%H:%M:%S"),
+            "outputType": "analysis",
+            "title": "Demand Forecasts Generated",
+            "summary": f"Generated 13-week probabilistic forecasts for {len(decision_pack.forecasts)} SKUs",
+            "details": "Used exponential smoothing with growing uncertainty bands. Forecasts include q10, q50, q90 quantiles for safety stock calculation. Seasonality patterns detected in historical data.",
+            "confidence": 0.88,
+            "rationale": [
+                {"step": 1, "description": "History Analysis", "reasoning": "Analyzed 52 weeks of demand history per SKU", "confidence": 0.95},
+                {"step": 2, "description": "Model Fitting", "reasoning": "Applied exponential smoothing with trend detection", "confidence": 0.90},
+                {"step": 3, "description": "Uncertainty Quantification", "reasoning": "Computed prediction intervals with growing uncertainty", "confidence": 0.85},
+            ],
+            "evidence": [
+                {"type": "data", "source": "Demand History", "description": "52 weeks x 5 SKUs = 260 data points", "weight": 0.9},
+                {"type": "model", "source": "Exponential Smoothing", "description": "Alpha=0.3 smoothing factor", "weight": 0.85},
+            ]
+        })
+        
+        # Optimizer output
+        outputs.append({
+            "id": "output-2",
+            "agentId": "agent-2",
+            "agentName": "Inventory Optimizer",
+            "timestamp": datetime.now().strftime("%H:%M:%S"),
+            "outputType": "recommendation",
+            "title": "Inventory Policies Optimized",
+            "summary": f"Computed optimal ROP, EOQ, and safety stock for {len(decision_pack.policies)} SKUs",
+            "details": "Policies balance service level targets (90-99%) against holding costs. Safety stock computed using demand uncertainty during lead time. EOQ minimizes total annual cost.",
+            "confidence": 0.90,
+            "rationale": [
+                {"step": 1, "description": "Service Level Mapping", "reasoning": "Mapped service level tiers to Z-scores (Bronze=1.28, Silver=1.65, Gold=2.05)", "confidence": 0.98},
+                {"step": 2, "description": "Safety Stock Calculation", "reasoning": "SS = Z * σ_d * √LT accounting for lead time variability", "confidence": 0.92},
+                {"step": 3, "description": "EOQ Optimization", "reasoning": "EOQ = √(2*D*K/h) with case-pack rounding", "confidence": 0.88},
+            ],
+            "evidence": [
+                {"type": "model", "source": "Stochastic Inventory Model", "description": "(r,Q) policy optimization", "weight": 0.95},
+                {"type": "data", "source": "Forecast Distributions", "description": "Mean and variance by SKU", "weight": 0.9},
+            ]
+        })
+        
+        # Risk output
+        high_risk = [r for r in decision_pack.risk_assessments.values() if r.risk_level in ["high", "critical"]]
+        outputs.append({
+            "id": "output-3",
+            "agentId": "agent-4",
+            "agentName": "Risk Analyst",
+            "timestamp": datetime.now().strftime("%H:%M:%S"),
+            "outputType": "analysis",
+            "title": f"Risk Assessment: {len(high_risk)} High-Risk SKUs",
+            "summary": f"Analyzed stockout and overstock risks for {len(decision_pack.risk_assessments)} SKUs",
+            "details": f"Identified {len(high_risk)} SKUs with elevated risk. Primary drivers: low inventory position relative to demand uncertainty, supplier lead time variability.",
+            "confidence": 0.85,
+            "rationale": [
+                {"step": 1, "description": "Stockout Probability", "reasoning": "P(stockout) based on inventory position vs. demand during lead time", "confidence": 0.88},
+                {"step": 2, "description": "Overstock Analysis", "reasoning": "Weeks of supply > 8 indicates overstock risk", "confidence": 0.85},
+                {"step": 3, "description": "Risk Scoring", "reasoning": "Weighted combination: 50% stockout + 30% lead time + 20% overstock", "confidence": 0.82},
+            ],
+            "evidence": [
+                {"type": "data", "source": "Inventory Positions", "description": "Current on-hand vs. reorder points", "weight": 0.9},
+                {"type": "model", "source": "Risk Model", "description": "Multi-factor risk scoring", "weight": 0.85},
+            ]
+        })
+        
+        # Procurement output
+        outputs.append({
+            "id": "output-4",
+            "agentId": "agent-6",
+            "agentName": "Procurement Planner",
+            "timestamp": datetime.now().strftime("%H:%M:%S"),
+            "outputType": "decision",
+            "title": f"Generated {len(decision_pack.procurement_plans)} Procurement Orders",
+            "summary": f"Priority-ranked procurement plans with ${sum(p.total_cost for p in decision_pack.procurement_plans):,.0f} total value",
+            "details": "Orders triggered by: below ROP, high risk levels. Assigned to preferred suppliers based on SKU mapping. Priority 1 = critical, Priority 2 = below ROP, Priority 3 = routine.",
+            "confidence": decision_pack.confidence_score,
+            "rationale": [
+                {"step": 1, "description": "Trigger Evaluation", "reasoning": "Check inventory position vs. ROP and risk levels", "confidence": 0.95},
+                {"step": 2, "description": "Supplier Assignment", "reasoning": "Map SKUs to preferred suppliers", "confidence": 0.92},
+                {"step": 3, "description": "Priority Ranking", "reasoning": "Rank by risk level and days to stockout", "confidence": 0.88},
+            ],
+            "evidence": [
+                {"type": "data", "source": "Inventory Policies", "description": "ROP and EOQ by SKU", "weight": 0.95},
+                {"type": "rule", "source": "Supplier Contracts", "description": "Supplier-SKU assignments", "weight": 0.9},
+            ]
+        })
+        
+        # Summary output
+        outputs.append({
+            "id": "output-5",
+            "agentId": "agent-8",
+            "agentName": "Report Writer",
+            "timestamp": datetime.now().strftime("%H:%M:%S"),
+            "outputType": "analysis",
+            "title": "Decision Pack Generated",
+            "summary": "Compiled comprehensive procurement decision pack with rationale",
+            "details": decision_pack.executive_summary[:400] + "..." if len(decision_pack.executive_summary) > 400 else decision_pack.executive_summary,
+            "confidence": 0.95,
+            "rationale": [
+                {"step": 1, "description": "Data Compilation", "reasoning": "Aggregated forecasts, policies, risks, and plans", "confidence": 0.98},
+                {"step": 2, "description": "Insight Extraction", "reasoning": "Identified key recommendations and risk mitigations", "confidence": 0.92},
+                {"step": 3, "description": "Summary Generation", "reasoning": "Created executive summary with confidence scores", "confidence": 0.95},
+            ],
+            "evidence": [
+                {"type": "model", "source": "Decision Pack", "description": "Complete analysis artifacts", "weight": 0.95},
+            ]
+        })
+    else:
+        outputs.append({
+            "id": "output-0",
+            "agentId": "agent-1",
+            "agentName": "System",
+            "timestamp": datetime.now().strftime("%H:%M:%S"),
+            "outputType": "analysis",
+            "title": "Awaiting Demo Execution",
+            "summary": "Run the D&P demo to see agent outputs with full rationale",
+            "details": "The agent output page will display detailed forecasts, policies, risk assessments, and procurement plans once the demo is executed.",
+            "confidence": 1.0,
+            "rationale": [{"step": 1, "description": "Initialization", "reasoning": "System ready for demo execution", "confidence": 1.0}],
+            "evidence": []
+        })
+    
+    return {
+        "agentOutputs": outputs,
+        "agents": agents
+    }
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)

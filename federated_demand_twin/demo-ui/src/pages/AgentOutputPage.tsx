@@ -78,8 +78,8 @@ export function AgentOutputPage() {
       {/* Page Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-slate-900">Agent Output & Rationale</h1>
-          <p className="text-slate-500 mt-1">Explainable AI decisions with full reasoning chains</p>
+          <h1 className="text-2xl font-bold text-slate-900">Media Allocation Decisions</h1>
+          <p className="text-slate-500 mt-1">Explainable spend recommendations with full reasoning chains</p>
         </div>
       </div>
 

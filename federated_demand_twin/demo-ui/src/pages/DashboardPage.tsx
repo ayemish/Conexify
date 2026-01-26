@@ -106,8 +106,8 @@ export function DashboardPage() {
       {/* Page Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-slate-900"> Control Center</h1>
-          <p className="text-slate-500 mt-1">Run and monitor the Retail Media Optimization Pipeline</p>
+          <h1 className="text-2xl font-bold text-slate-900">Media Spend Control Center</h1>
+          <p className="text-slate-500 mt-1">Run and monitor the Retail Media Budget Allocation Pipeline</p>
         </div>
         <div className="flex items-center gap-3">
           {backendConnected === false && (
@@ -217,11 +217,11 @@ export function DashboardPage() {
           {/* Pipeline Steps */}
           <div className="grid grid-cols-5 gap-2 mt-6">
             {[
-              { name: 'Initialize', icon: Database, threshold: 10 },
-              { name: 'Register', icon: Users, threshold: 40 },
-              { name: 'Bayesian', icon: Brain, threshold: 65 },
+              { name: 'Configure', icon: Database, threshold: 10 },
+              { name: 'Channels', icon: Users, threshold: 40 },
+              { name: 'Elasticity', icon: Brain, threshold: 65 },
               { name: 'Simulate', icon: Zap, threshold: 85 },
-              { name: 'Results', icon: CheckCircle, threshold: 100 },
+              { name: 'Allocate', icon: CheckCircle, threshold: 100 },
             ].map((step, index) => {
               const isComplete = status.progress >= step.threshold;
               const isActive = status.progress > (index > 0 ? [10, 40, 65, 85, 100][index - 1] : 0) && status.progress < step.threshold;
@@ -298,7 +298,7 @@ export function DashboardPage() {
             <p className="text-2xl font-bold">Complete</p>
           </div>
           <div className="bg-white rounded-xl border border-slate-200 p-5">
-            <p className="text-slate-500 text-sm mb-1">Total Budget</p>
+            <p className="text-slate-500 text-sm mb-1">Media Budget</p>
             <p className="text-2xl font-bold text-slate-900">$10M</p>
           </div>
           <div className="bg-white rounded-xl border border-slate-200 p-5">

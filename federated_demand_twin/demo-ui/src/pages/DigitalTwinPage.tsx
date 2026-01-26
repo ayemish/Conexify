@@ -17,11 +17,11 @@ const statusColors = {
 };
 
 const deviceIcons: Record<string, typeof Cpu> = {
-  compressor: Cpu,
-  pump: RefreshCw,
-  valve: Activity,
+  retailer: Cpu,
+  channel: RefreshCw,
+  sku: Activity,
   sensor: Thermometer,
-  hvac: Zap,
+  media: Zap,
 };
 
 export function DigitalTwinPage() {
@@ -75,8 +75,8 @@ export function DigitalTwinPage() {
       {/* Page Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-slate-900">Digital Twin</h1>
-          <p className="text-slate-500 mt-1">Real-time device status and telemetry monitoring</p>
+          <h1 className="text-2xl font-bold text-slate-900">Media Twin Simulation</h1>
+          <p className="text-slate-500 mt-1">Retailer-channel inventory state and media-driven demand simulation</p>
         </div>
         <div className="flex items-center gap-4">
           <div className="flex items-center gap-2 text-sm text-slate-500">
@@ -179,10 +179,10 @@ export function DigitalTwinPage() {
         <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center gap-2">
-              <Thermometer className="w-5 h-5 text-red-500" />
-              <h2 className="text-lg font-semibold text-slate-900">Discharge Temperature</h2>
+              <Thermometer className="w-5 h-5 text-indigo-500" />
+              <h2 className="text-lg font-semibold text-slate-900">Media-Driven Demand Lift</h2>
             </div>
-            <span className="text-sm text-red-600 font-medium">⚠️ Above threshold</span>
+            <span className="text-sm text-indigo-600 font-medium">📈 Active campaigns</span>
           </div>
           <div className="h-48">
             <ResponsiveContainer width="100%" height="100%">
@@ -191,14 +191,14 @@ export function DigitalTwinPage() {
                 <XAxis dataKey="time" tick={{ fontSize: 10 }} stroke="#94a3b8" />
                 <YAxis domain={[150, 200]} tick={{ fontSize: 10 }} stroke="#94a3b8" />
                 <Tooltip />
-                <ReferenceLine y={180} stroke="#ef4444" strokeDasharray="5 5" label={{ value: 'Threshold', fill: '#ef4444', fontSize: 10 }} />
+                <ReferenceLine y={180} stroke="#6366f1" strokeDasharray="5 5" label={{ value: 'Target Lift', fill: '#6366f1', fontSize: 10 }} />
                 <Line 
                   type="monotone" 
                   dataKey="dischargeTemp" 
-                  stroke="#ef4444" 
+                  stroke="#6366f1" 
                   strokeWidth={2}
                   dot={false}
-                  name="Temp (°F)"
+                  name="Demand Lift %"
                 />
               </LineChart>
             </ResponsiveContainer>
@@ -209,10 +209,10 @@ export function DigitalTwinPage() {
         <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center gap-2">
-              <Activity className="w-5 h-5 text-amber-500" />
-              <h2 className="text-lg font-semibold text-slate-900">Compressor Cycle Rate</h2>
+              <Activity className="w-5 h-5 text-emerald-500" />
+              <h2 className="text-lg font-semibold text-slate-900">ROAS by Channel</h2>
             </div>
-            <span className="text-sm text-amber-600 font-medium">⚠️ Short-cycling detected</span>
+            <span className="text-sm text-emerald-600 font-medium">💰 Budget efficiency</span>
           </div>
           <div className="h-48">
             <ResponsiveContainer width="100%" height="100%">
@@ -221,14 +221,14 @@ export function DigitalTwinPage() {
                 <XAxis dataKey="time" tick={{ fontSize: 10 }} stroke="#94a3b8" />
                 <YAxis domain={[0, 35]} tick={{ fontSize: 10 }} stroke="#94a3b8" />
                 <Tooltip />
-                <ReferenceLine y={12} stroke="#f59e0b" strokeDasharray="5 5" label={{ value: 'Max Normal', fill: '#f59e0b', fontSize: 10 }} />
+                <ReferenceLine y={12} stroke="#10b981" strokeDasharray="5 5" label={{ value: 'Target ROAS', fill: '#10b981', fontSize: 10 }} />
                 <Line 
                   type="monotone" 
                   dataKey="cycleRate" 
-                  stroke="#f59e0b" 
+                  stroke="#10b981" 
                   strokeWidth={2}
                   dot={false}
-                  name="Cycles/hr"
+                  name="ROAS"
                 />
               </LineChart>
             </ResponsiveContainer>
@@ -241,7 +241,7 @@ export function DigitalTwinPage() {
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-2">
             <Box className="w-5 h-5 text-indigo-600" />
-            <h2 className="text-lg font-semibold text-slate-900">Digital Twin Activity</h2>
+            <h2 className="text-lg font-semibold text-slate-900">Media Twin Activity</h2>
           </div>
           <span className="text-sm text-slate-500">{twinActivities.length} events</span>
         </div>

@@ -59,8 +59,8 @@ export function BayesianModelPage() {
       {/* Page Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-slate-900">Bayesian Model Output</h1>
-          <p className="text-slate-500 mt-1">Federated learning predictions with uncertainty quantification</p>
+          <h1 className="text-2xl font-bold text-slate-900">Media Elasticity Model</h1>
+          <p className="text-slate-500 mt-1">Bayesian elasticity estimation with cross-retailer learning</p>
         </div>
         <div className="flex items-center gap-2 text-sm">
           <span className="text-slate-500">Last update:</span>
@@ -123,7 +123,7 @@ export function BayesianModelPage() {
             <h2 className="text-lg font-semibold text-slate-900">Posterior Convergence</h2>
           </div>
           <p className="text-sm text-slate-500 mb-4">
-            Failure probability updating from prior (45%) to posterior (73%) as evidence accumulates
+            Media elasticity estimates updating as cross-retailer evidence accumulates
           </p>
           <div className="h-64">
             <ResponsiveContainer width="100%" height="100%">
@@ -176,11 +176,11 @@ export function BayesianModelPage() {
           <div className="flex items-center justify-center gap-6 mt-4">
             <div className="flex items-center gap-2">
               <div className="w-8 h-0.5 bg-slate-400" style={{ backgroundImage: 'repeating-linear-gradient(90deg, #94a3b8 0, #94a3b8 5px, transparent 5px, transparent 10px)' }}></div>
-              <span className="text-sm text-slate-600">Prior (45%)</span>
+              <span className="text-sm text-slate-600">Prior Elasticity</span>
             </div>
             <div className="flex items-center gap-2">
               <div className="w-8 h-1 bg-blue-600 rounded"></div>
-              <span className="text-sm text-slate-600">Posterior (73%)</span>
+              <span className="text-sm text-slate-600">Posterior Elasticity</span>
             </div>
             <div className="flex items-center gap-2">
               <div className="w-8 h-3 bg-blue-100 rounded"></div>
@@ -196,7 +196,7 @@ export function BayesianModelPage() {
             <h2 className="text-lg font-semibold text-slate-900">Model Parameters</h2>
           </div>
           <p className="text-sm text-slate-500 mb-4">
-            Parameter estimates with prior → posterior shift
+            ROAS and elasticity parameter estimates with Bayesian updating
           </p>
           <div className="h-64">
             <ResponsiveContainer width="100%" height="100%">

@@ -72,8 +72,8 @@ export function OrchestrationPage() {
       {/* Page Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-slate-900">Agent Orchestration</h1>
-          <p className="text-slate-500 mt-1">Multi-agent workflow coordination and case lifecycle</p>
+          <h1 className="text-2xl font-bold text-slate-900">Media Allocation Orchestration</h1>
+          <p className="text-slate-500 mt-1">Multi-agent media spend optimization workflow</p>
         </div>
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-2 px-3 py-1.5 bg-blue-50 border border-blue-200 rounded-full">
@@ -89,10 +89,10 @@ export function OrchestrationPage() {
           <div>
             <div className="flex items-center gap-2 mb-2">
               <Workflow className="w-5 h-5" />
-              <span className="text-indigo-200 text-sm font-medium">ACTIVE CASE</span>
+              <span className="text-indigo-200 text-sm font-medium">ACTIVE CAMPAIGN</span>
             </div>
             <h2 className="text-2xl font-bold mb-1">{currentCase.title}</h2>
-            <p className="text-indigo-200">Case ID: {currentCase.id}</p>
+            <p className="text-indigo-200">Campaign ID: {currentCase.id}</p>
           </div>
           <div className="text-right">
             <div className="flex items-center gap-6">
@@ -115,7 +115,7 @@ export function OrchestrationPage() {
         {/* Progress Bar */}
         <div className="mt-6">
           <div className="flex items-center justify-between mb-2">
-            <span className="text-sm text-indigo-200">Case Progress</span>
+            <span className="text-sm text-indigo-200">Campaign Progress</span>
             <span className="text-sm font-medium">Stage 3 of 8: {currentCase.status.toUpperCase()}</span>
           </div>
           <div className="h-2 bg-indigo-800 rounded-full overflow-hidden">
@@ -128,7 +128,7 @@ export function OrchestrationPage() {
       <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
         <div className="flex items-center gap-2 mb-6">
           <Zap className="w-5 h-5 text-purple-600" />
-          <h2 className="text-lg font-semibold text-slate-900">9-State Case Lifecycle</h2>
+          <h2 className="text-lg font-semibold text-slate-900">Media Optimization Pipeline</h2>
         </div>
         
         <div className="flex items-center justify-between">

@@ -1,0 +1,107 @@
+# Federated Demand Forecasting + Bayesian Decision Twin MVP
+# Requirements file for reproducible builds
+
+# =============================================================================
+# Core Dependencies
+# =============================================================================
+
+# Data processing
+numpy>=1.24.0
+pandas>=2.0.0
+pyarrow>=12.0.0
+scipy>=1.10.0
+
+# Machine Learning
+torch>=2.0.0
+scikit-learn>=1.2.0
+
+# =============================================================================
+# Federated Learning (Sprint 2)
+# =============================================================================
+
+flwr>=1.5.0  # Flower - FL framework with SecAgg+ support
+
+# =============================================================================
+# Forecasting (Sprint 3)
+# =============================================================================
+
+# neuralforecast>=1.6.0  # Nixtla - N-BEATS and related models (optional)
+statsmodels>=0.14.0  # Time series utilities
+
+# =============================================================================
+# Bayesian Inference (Sprint 4)
+# =============================================================================
+
+# Primary Bayesian stack (choose one)
+pymc>=5.0.0  # PyMC - recommended for MVP
+arviz>=0.15.0  # Visualization and diagnostics
+
+# Alternative Bayesian stacks (optional)
+# cmdstanpy>=1.1.0  # CmdStan interface
+# numpyro>=0.12.0  # JAX-based (requires jax)
+
+# =============================================================================
+# Optimization (Sprint 4)
+# =============================================================================
+
+ortools>=9.6.0  # Google OR-Tools - CP-SAT/MIP solver
+# cvxpy>=1.3.0  # Alternative convex optimization (optional)
+
+# =============================================================================
+# Digital Twin & Simulation (Sprint 5)
+# =============================================================================
+
+simpy>=4.0.0  # Discrete event simulation
+networkx>=3.0  # Graph/network utilities
+
+# =============================================================================
+# Agent Framework (Sprint 5)
+# =============================================================================
+
+crewai>=0.28.0  # CrewAI - agent orchestration
+# langchain>=0.1.0  # Optional - broader LLM abstraction
+
+# =============================================================================
+# API & Services
+# =============================================================================
+
+fastapi>=0.100.0
+uvicorn>=0.22.0
+pydantic>=2.0.0
+httpx>=0.24.0
+
+# =============================================================================
+# Database & Caching
+# =============================================================================
+
+sqlalchemy>=2.0.0
+redis>=4.5.0
+# celery>=5.3.0  # Optional - distributed tasks
+
+# =============================================================================
+# Observability
+# =============================================================================
+
+structlog>=23.1.0
+prometheus-client>=0.17.0
+# opentelemetry-api>=1.18.0  # Optional - tracing
+
+# =============================================================================
+# Development & Testing
+# =============================================================================
+
+pytest>=7.3.0
+pytest-asyncio>=0.21.0
+hypothesis>=6.75.0  # Property-based testing
+ruff>=0.0.270  # Linting
+black>=23.3.0  # Formatting
+mypy>=1.3.0  # Type checking
+
+# =============================================================================
+# Jupyter & Visualization (Optional)
+# =============================================================================
+
+jupyter>=1.0.0
+matplotlib>=3.7.0
+seaborn>=0.12.0
+plotly>=5.14.0

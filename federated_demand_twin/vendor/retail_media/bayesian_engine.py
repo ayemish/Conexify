@@ -64,6 +64,11 @@ class ChannelElasticityModel:
     def __init__(self, config: Optional[BayesianEngineConfig] = None):
         self.config = config or BayesianEngineConfig()
         self.posteriors: Dict[str, ElasticityPosterior] = {}
+        self._twin_update_callback: Optional[callable] = None
+    
+    def register_twin_update_callback(self, callback: callable) -> None:
+        """Register a callback to be called when posteriors are updated."""
+        self._twin_update_callback = callback
         
     def update_posterior(
         self,
@@ -179,6 +184,20 @@ class ChannelElasticityModel:
         self.posteriors[key] = posterior
         
         logger.info(f"Updated elasticity posterior for {key}: mean={posterior_mean:.3f}, std={posterior_std:.3f}")
+        
+        # Notify twin updater if registered
+        if self._twin_update_callback:
+            self._twin_update_callback(
+                channel_id=key,
+                retailer_id=retailer_id,
+                elasticity_mean=float(posterior_mean),
+                elasticity_std=float(posterior_std),
+                ci_lower=float(ci_lower),
+                ci_upper=float(ci_upper),
+                n_observations=n_obs,
+                evidence_strength=float(evidence_strength),
+                model_version="elasticity-v1.0.0",
+            )
         
         return posterior
     

@@ -114,6 +114,63 @@ from .orchestrator_v2 import (
     CaseLifecycleManager,
 )
 
+# ML Learning Loop System
+from .learning_loop import (
+    # Enumerations
+    ModelType,
+    ModelStage,
+    ExperimentStatus,
+    TrafficSplitStrategy,
+    RetrainingTriggerType,
+    ApprovalStatus,
+    GovernanceAction,
+    # Data Models
+    PerformanceMetrics,
+    ModelArtifact,
+    ModelVersion,
+    ExperimentVariant,
+    Experiment,
+    RetrainingTrigger,
+    RetrainingJob,
+    GovernanceApproval,
+    # Components
+    ModelRegistry,
+    ABTestingFramework,
+    RetrainingPipeline,
+    MLGovernanceController,
+    RollbackManager,
+    # Integrated System
+    HVACRPdMSystem,
+)
+
+# Observability & API Layer (Phase 5)
+from .observability import (
+    # Enums
+    MetricType,
+    MetricNamespace,
+    AlertSeverity,
+    AlertState,
+    NotificationChannelType,
+    HealthStatus,
+    JobStatus,
+    # Data Models
+    MetricPoint,
+    MetricSeries,
+    AlertRule,
+    ComponentHealth,
+    SystemHealth,
+    ScheduledJob,
+    JobExecution,
+    # Components
+    MetricsCollector,
+    HVACRPdMAPI,
+    NotificationService,
+    Scheduler,
+    HealthChecker,
+    DiagnosticsRunner,
+    ObservabilityStack,
+)
+
 __all__ = [
     # Legacy Agents (v1)
     "TelemetryIngestionAgent",
@@ -185,4 +242,60 @@ __all__ = [
     "OrchestrationConfig",
     "OrchestrationPattern",
     "CaseLifecycleManager",
+    
+    # ML Learning Loop System - Enumerations
+    "ModelType",
+    "ModelStage",
+    "ExperimentStatus",
+    "TrafficSplitStrategy",
+    "RetrainingTriggerType",
+    "ApprovalStatus",
+    "GovernanceAction",
+    
+    # ML Learning Loop System - Data Models
+    "PerformanceMetrics",
+    "ModelArtifact",
+    "ModelVersion",
+    "ExperimentVariant",
+    "Experiment",
+    "RetrainingTrigger",
+    "RetrainingJob",
+    "GovernanceApproval",
+    
+    # ML Learning Loop System - Components
+    "ModelRegistry",
+    "ABTestingFramework",
+    "RetrainingPipeline",
+    "MLGovernanceController",
+    "RollbackManager",
+    
+    # ML Learning Loop System - Integrated System
+    "HVACRPdMSystem",
+    
+    # Observability & API Layer - Enums
+    "MetricType",
+    "MetricNamespace",
+    "AlertSeverity",
+    "AlertState",
+    "NotificationChannelType",
+    "HealthStatus",
+    "JobStatus",
+    
+    # Observability & API Layer - Data Models
+    "MetricPoint",
+    "MetricSeries",
+    "AlertRule",
+    "ComponentHealth",
+    "SystemHealth",
+    "ScheduledJob",
+    "JobExecution",
+    
+    # Observability & API Layer - Components
+    "MetricsCollector",
+    "HVACRPdMAPI",
+    "NotificationService",
+    "Scheduler",
+    "HealthChecker",
+    "DiagnosticsRunner",
+    "ObservabilityStack",
 ]

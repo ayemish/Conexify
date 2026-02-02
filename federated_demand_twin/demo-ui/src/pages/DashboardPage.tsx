@@ -136,7 +136,7 @@ export function DashboardPage() {
             ) : (
               <>
                 <Play className="w-5 h-5" />
-                Run Demo
+                Execute
               </>
             )}
           </button>
@@ -264,7 +264,7 @@ export function DashboardPage() {
         <div className="h-96 overflow-y-auto p-4 font-mono text-sm">
           {logs.length === 0 ? (
             <div className="text-slate-500 text-center py-8">
-              Click "Run Demo" to start the pipeline...
+              Click "Execute" to start the pipeline...
             </div>
           ) : (
             logs.map((log, index) => (

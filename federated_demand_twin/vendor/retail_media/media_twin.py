@@ -164,23 +164,13 @@ class MediaSimulationEngine:
                             )
                             total_demand_units *= (1 - cannibalization)
                         
-                        # Inventory simulation
-                        if self.config.enable_inventory_simulation:
-                            available_inventory = state.on_hand_inventory * (1 - scenario.supply_disruption)
-                            fulfilled = min(total_demand_units, available_inventory)
-                            stockout_units = max(0, total_demand_units - available_inventory)
-                            
-                            # Update state
-                            state.on_hand_inventory = max(0, available_inventory - fulfilled)
-                            state.fulfilled_demand = fulfilled
-                            state.stockout_units = stockout_units
-                            
-                            # Replenishment (simplified)
-                            if state.on_hand_inventory < state.reorder_point:
-                                state.on_hand_inventory += sku_config.weekly_base_demand * 4
-                        else:
-                            fulfilled = total_demand_units
-                            stockout_units = 0
+                        # Channel-focused simulation (no inventory constraints)
+                        fulfilled = total_demand_units
+                        stockout_units = 0
+                        
+                        # Update channel state metrics
+                        state.total_impressions += weekly_spend.get(retailer_id, 0) * 100  # Approximate impressions
+                        state.total_conversions += fulfilled * 0.02  # Approximate conversion rate
                         
                         # Compute revenue
                         incremental_sales = fulfilled * lift * sku_config.unit_price
@@ -423,9 +413,6 @@ class RetailMediaTwin:
             week=0,
             base_demand_mean=base_demand_mean,
             base_demand_std=base_demand_std,
-            on_hand_inventory=initial_inventory,
-            lead_time_weeks=sku_config.lead_time_weeks if sku_config else 2,
-            reorder_point=base_demand_mean * 2,  # 2 weeks of demand
         )
         
         # Set elasticity beliefs from posteriors
@@ -560,22 +547,24 @@ class RetailMediaTwin:
     
     def get_state_summary(self) -> Dict[str, Any]:
         """Get summary of current Twin state"""
-        total_inventory = 0
+        total_revenue = 0
         total_demand = 0
+        total_impressions = 0
         n_states = 0
         
         for retailer_states in self.states.values():
             for state in retailer_states.values():
-                total_inventory += state.on_hand_inventory
+                total_revenue += state.revenue
                 total_demand += state.base_demand_mean
+                total_impressions += state.total_impressions
                 n_states += 1
         
         return {
             'n_retailers': len(self.states),
             'n_states': n_states,
-            'total_inventory': total_inventory,
+            'total_revenue': total_revenue,
             'total_weekly_demand': total_demand,
-            'weeks_of_supply': total_inventory / total_demand if total_demand > 0 else 0,
+            'total_impressions': total_impressions,
             'n_posteriors': sum(len(p) for p in self.elasticity_posteriors.values()),
         }
     

@@ -125,13 +125,13 @@ export interface SKU {
 }
 
 class ApiService {
-  private baseUrl: string;
+  protected baseUrl: string;
 
   constructor(baseUrl: string = API_BASE_URL) {
     this.baseUrl = baseUrl;
   }
 
-  private async fetch<T>(endpoint: string, options?: RequestInit): Promise<T> {
+  protected async fetch<T>(endpoint: string, options?: RequestInit): Promise<T> {
     const response = await fetch(`${this.baseUrl}${endpoint}`, {
       ...options,
       headers: {
@@ -385,5 +385,98 @@ export interface AgentOutputPageData {
   agents: Agent[];
 }
 
-export const api = new ApiService();
+// Autonomous Orchestration Types
+export interface ParallelTrack {
+  id: string;
+  name: string;
+  type: string;
+  status: 'pending' | 'running' | 'completed' | 'idle';
+  progress: number;
+  agents: string[];
+}
+
+export interface CollaborationEvent {
+  id: string;
+  timestamp: string;
+  type: 'delegation' | 'information_sharing' | 'consensus_request' | 'parallel_execution' | 'feedback_loop' | 'negotiation';
+  initiator: string;
+  targets: string[];
+  topic: string;
+  status: string;
+}
+
+export interface CollaborationGraphNode {
+  id: string;
+  role: string;
+}
+
+export interface CollaborationGraphEdge {
+  source: string;
+  target: string;
+  count: number;
+  weight: number;
+}
+
+export interface CollaborationGraph {
+  nodes: CollaborationGraphNode[];
+  edges: CollaborationGraphEdge[];
+}
+
+export interface AutonomousAgent extends Agent {
+  track: string;
+}
+
+export interface AutonomousCurrentCase {
+  id: string;
+  title: string;
+  status: string;
+  priority: string;
+  assignedAgents: string[];
+  collaborations: number;
+  parallelTracks: number;
+  totalTracks: number;
+  totalBudget: number;
+  confidence: number;
+}
+
+export interface AutonomousOrchestrationPageData {
+  agents: AutonomousAgent[];
+  parallelTracks: ParallelTrack[];
+  collaborationEvents: CollaborationEvent[];
+  collaborationGraph: CollaborationGraph;
+  currentCase: AutonomousCurrentCase;
+  governance: {
+    autonomyLevel: string;
+    policyChecks: { passed: number; total: number };
+    pendingApprovals: number;
+    auditEntries: number;
+  };
+  workflowMode: string;
+}
+
+// Extend ApiService with agent collaboration page data (integrated with main demo)
+class ExtendedApiService extends ApiService {
+  async getAutonomousOrchestrationPageData(): Promise<AutonomousOrchestrationPageData> {
+    return this.fetch('/api/ui/autonomous-orchestration');
+  }
+
+  protected async fetch<T>(endpoint: string, options?: RequestInit): Promise<T> {
+    const response = await fetch(`http://localhost:8000${endpoint}`, {
+      ...options,
+      headers: {
+        'Content-Type': 'application/json',
+        ...options?.headers,
+      },
+    });
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: 'Unknown error' }));
+      throw new Error(error.detail || `HTTP error ${response.status}`);
+    }
+
+    return response.json();
+  }
+}
+
+export const api = new ExtendedApiService();
 export default api;

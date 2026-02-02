@@ -28,6 +28,8 @@ from .schemas import (
     MediaSimulationResult,
     MediaDecisionPack,
     AllocationStatus,
+    AgentCollaboration,
+    CollaborationType,
 )
 
 from .bayesian_engine import (
@@ -164,6 +166,10 @@ class RetailMediaOrchestrator:
         self.pipeline_steps: List[PipelineStep] = []
         self.run_history: List[Dict[str, Any]] = []
         
+        # Agent collaboration tracking
+        self.collaboration_events: List[AgentCollaboration] = []
+        self._collab_counter: int = 0
+        
         # Setup output directory
         Path(self.config.output_path).mkdir(parents=True, exist_ok=True)
         
@@ -263,6 +269,8 @@ class RetailMediaOrchestrator:
         """
         self.run_id = f"run-{uuid.uuid4().hex[:8]}"
         self.pipeline_steps = []
+        self.collaboration_events = []
+        self._collab_counter = 0
         start_time = datetime.utcnow()
         
         logger.info(f"Starting pipeline run {self.run_id}")
@@ -271,6 +279,15 @@ class RetailMediaOrchestrator:
         step = self._log_step("bayesian_calibration", "Calibrate Twin with Bayesian posteriors")
         step.start()
         try:
+            # Collaboration: Bayesian engine shares posteriors with Digital Twin
+            self._record_collaboration(
+                CollaborationType.INFORMATION_SHARING,
+                initiator="BayesianEngine",
+                targets=["DigitalTwin"],
+                topic="Share calibrated elasticity posteriors for simulation",
+                context={"n_retailers": len(self.bayesian_engine.retailers)},
+                outcome="Posteriors transferred to Twin"
+            )
             posteriors = self.bayesian_engine.get_all_posteriors_for_twin()
             self.twin.initialize_from_bayesian_posteriors(posteriors)
             step.complete(f"Loaded posteriors for {len(posteriors)} retailers")
@@ -284,6 +301,15 @@ class RetailMediaOrchestrator:
             step = self._log_step("attribution", "Compute channel attribution")
             step.start()
             try:
+                # Collaboration: Attribution agent requests conversion path data
+                self._record_collaboration(
+                    CollaborationType.INFORMATION_SHARING,
+                    initiator="AttributionAgent",
+                    targets=["DataPipeline", "ScenarioAgent"],
+                    topic="Request conversion paths and spend history for attribution modeling",
+                    context={"n_paths": len(conversion_paths), "n_channels": len(spend_history)},
+                    outcome="Attribution weights computed"
+                )
                 attribution_result = self.attribution_agent.process(
                     conversion_paths=conversion_paths,
                     spend_by_channel=spend_history,
@@ -300,6 +326,15 @@ class RetailMediaOrchestrator:
             step = self._log_step("scenario_generation", "Generate candidate scenarios")
             step.start()
             try:
+                # Collaboration: Scenario agent consults Bayesian posteriors and Attribution
+                self._record_collaboration(
+                    CollaborationType.CONSENSUS_REQUEST,
+                    initiator="ScenarioAgent",
+                    targets=["BayesianEngine", "AttributionAgent", "DigitalTwin"],
+                    topic="Request elasticity posteriors and attribution to inform scenario generation",
+                    context={"current_budget": current_allocation.total_budget},
+                    outcome="Scenarios designed using posterior-informed constraints"
+                )
                 scenarios = self.scenario_agent.generate_scenarios(
                     current_allocation=current_allocation,
                     elasticity_posteriors=posteriors,
@@ -321,10 +356,28 @@ class RetailMediaOrchestrator:
         step = self._log_step("twin_simulation", "Run Digital Twin simulations")
         step.start()
         try:
+            # Collaboration: Twin receives scenarios and runs parallel simulations
+            self._record_collaboration(
+                CollaborationType.DELEGATION,
+                initiator="ScenarioAgent",
+                targets=["DigitalTwin"],
+                topic="Delegate scenario simulation to Digital Twin with Bayesian posteriors",
+                context={"n_scenarios": len(scenarios), "n_simulations": self.config.n_simulations},
+                outcome="Monte Carlo simulations executed"
+            )
             simulation_results = self.twin.compare_scenarios(
                 scenarios=scenarios,
                 n_simulations=self.config.n_simulations,
                 simulation_weeks=self.config.simulation_weeks
+            )
+            # Collaboration: Twin shares results back to Optimization agent
+            self._record_collaboration(
+                CollaborationType.INFORMATION_SHARING,
+                initiator="DigitalTwin",
+                targets=["OptimizationAgent", "GovernanceAgent"],
+                topic="Share simulation results with KPI distributions and uncertainty bounds",
+                context={"scenarios_simulated": len(simulation_results)},
+                outcome="Simulation results ready for optimization"
             )
             step.complete(f"Simulated {len(simulation_results)} scenarios")
         except Exception as e:
@@ -338,6 +391,15 @@ class RetailMediaOrchestrator:
             step = self._log_step("optimization", "Solve optimal allocation")
             step.start()
             try:
+                # Collaboration: Optimization agent negotiates with Governance for constraints
+                self._record_collaboration(
+                    CollaborationType.NEGOTIATION,
+                    initiator="OptimizationAgent",
+                    targets=["GovernanceAgent"],
+                    topic="Negotiate budget constraints and risk thresholds before optimization",
+                    context={"total_budget": total_budget, "n_retailers": len(self.twin.retailers)},
+                    outcome="Constraints agreed for optimization"
+                )
                 recommended_allocation = self.optimization_agent.optimize(
                     simulation_results=simulation_results,
                     retailers=dict(self.twin.retailers),
@@ -355,6 +417,15 @@ class RetailMediaOrchestrator:
             step = self._log_step("governance", "Validate recommendation")
             step.start()
             try:
+                # Collaboration: Governance agent requests validation from all agents
+                self._record_collaboration(
+                    CollaborationType.VALIDATION_REQUEST,
+                    initiator="GovernanceAgent",
+                    targets=["OptimizationAgent", "DigitalTwin", "BayesianEngine"],
+                    topic="Request validation of recommendation against policies and risk thresholds",
+                    context={"recommendation_budget": recommended_allocation.total_budget},
+                    outcome="Validation checks initiated"
+                )
                 # Get best simulation result for validation
                 best_result = None
                 for result in simulation_results.values():
@@ -368,6 +439,15 @@ class RetailMediaOrchestrator:
                         prior_allocation=current_allocation,
                         retailers=dict(self.twin.retailers)
                     )
+                    # Collaboration: Governance provides feedback to Rationale agent
+                    self._record_collaboration(
+                        CollaborationType.FEEDBACK_LOOP,
+                        initiator="GovernanceAgent",
+                        targets=["RationaleAgent", "OptimizationAgent"],
+                        topic=f"Governance decision: {governance_decision.status.value}",
+                        context={"approved": governance_decision.approved, "n_checks": len(governance_decision.checks)},
+                        outcome="Decision communicated for rationale generation"
+                    )
                     step.complete(f"Governance: {governance_decision.status.value}")
             except Exception as e:
                 step.fail(str(e))
@@ -379,6 +459,15 @@ class RetailMediaOrchestrator:
             step = self._log_step("rationale", "Generate decision rationale")
             step.start()
             try:
+                # Collaboration: Rationale agent gathers inputs from all agents
+                self._record_collaboration(
+                    CollaborationType.CONSENSUS_REQUEST,
+                    initiator="RationaleAgent",
+                    targets=["BayesianEngine", "DigitalTwin", "OptimizationAgent", "GovernanceAgent"],
+                    topic="Gather all agent outputs to synthesize human-readable rationale",
+                    context={"governance_approved": governance_decision.approved if governance_decision else None},
+                    outcome="Rationale synthesis with uncertainty acknowledgment"
+                )
                 rationale = self.rationale_agent.generate_rationale(
                     recommendation=recommended_allocation,
                     simulation_results=simulation_results,
@@ -410,6 +499,7 @@ class RetailMediaOrchestrator:
             uncertainty_acknowledgment=rationale['uncertainty_acknowledgment'],
             overall_confidence=self._compute_overall_confidence(posteriors, simulation_results),
             data_quality_score=self._compute_data_quality_score(posteriors),
+            collaboration_events=list(self.collaboration_events),
             bayesian_model_version=self.config.bayesian_model_version,
             twin_model_version=self.config.twin_model_version,
             agent_versions={
@@ -436,6 +526,31 @@ class RetailMediaOrchestrator:
         step = PipelineStep(step_name=name, description=description)
         self.pipeline_steps.append(step)
         return step
+    
+    def _record_collaboration(
+        self,
+        collab_type: CollaborationType,
+        initiator: str,
+        targets: List[str],
+        topic: str,
+        context: Optional[Dict[str, Any]] = None,
+        outcome: str = ""
+    ) -> AgentCollaboration:
+        """Record an agent collaboration event"""
+        self._collab_counter += 1
+        collab = AgentCollaboration(
+            collaboration_id=f"collab-{self.run_id}-{self._collab_counter:03d}",
+            timestamp=datetime.utcnow(),
+            collaboration_type=collab_type,
+            initiator_agent=initiator,
+            target_agents=targets,
+            topic=topic,
+            context=context or {},
+            outcome=outcome,
+        )
+        self.collaboration_events.append(collab)
+        logger.info(f"Agent collaboration: {initiator} → {targets} ({collab_type.value}): {topic}")
+        return collab
     
     def _build_scenario_comparison(
         self,

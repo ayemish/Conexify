@@ -117,7 +117,19 @@ def get_pdm_system(asset_id: str):
     """Get or create PDM system for an asset"""
     if asset_id not in _pdm_systems:
         from ..integration.advanced_system import create_pdm_system
-        _pdm_systems[asset_id] = create_pdm_system(asset_id)
+        from ..config import settings
+        session_factory = None
+        if settings.persistence.enabled:
+            try:
+                from ..persistence.database import get_session_factory
+                session_factory = get_session_factory()
+            except Exception:
+                session_factory = None
+        _pdm_systems[asset_id] = create_pdm_system(
+            asset_id,
+            site_id=settings.site_id,
+            session_factory=session_factory,
+        )
     return _pdm_systems[asset_id]
 
 
@@ -639,6 +651,12 @@ async def get_deployment_metrics(
                 no_issue_found_rate=metrics.no_issue_found_rate,
                 lead_time_hours_mean=metrics.lead_time_hours_mean,
                 lead_time_hours_p50=metrics.lead_time_hours_p50,
+                lead_time_hours_p90=metrics.lead_time_hours_p90,
+                lead_time_hours_p95=metrics.lead_time_hours_p95,
+                lead_time_hours_min=metrics.lead_time_hours_min,
+                lead_time_hours_max=metrics.lead_time_hours_max,
+                lead_time_hours_histogram=metrics.lead_time_hours_histogram,
+                precision_at_k=metrics.precision_at_k,
             )
         else:
             # Aggregate metrics (placeholder)
@@ -652,6 +670,8 @@ async def get_deployment_metrics(
                 alarms_per_unit_per_month=0.0,
                 actionable_per_unit_per_month=0.0,
                 no_issue_found_rate=0.0,
+                lead_time_hours_histogram={},
+                precision_at_k={},
             )
     except Exception as e:
         logger.error(f"Error getting deployment metrics: {e}")

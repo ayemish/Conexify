@@ -25,6 +25,7 @@ import numpy as np
 
 from ..core.schemas import (
     ChangePointDetection,
+    JointChangeDetection,
     OperatingRegime,
     ResidualObservation,
     SensorType,
@@ -73,6 +74,14 @@ class ChangeDetectorConfig:
     stability_window: int = 20
     min_stability_for_alarm: float = 0.7
 
+    # Joint (cross-sensor) detection parameters
+    joint_enabled: bool = True
+    joint_cusum_threshold: float = 8.0
+    joint_glr_threshold: float = 15.0
+    joint_min_trusted_sensors: int = 2
+    joint_min_persistence_minutes: float = 30.0
+    joint_min_stability_for_alarm: float = 0.6
+
 
 class SequentialChangeDetectionService:
     """
@@ -105,6 +114,12 @@ class SequentialChangeDetectionService:
         
         # Alarm state
         self.active_alarms: Dict[str, ChangePointDetection] = {}
+
+        # Joint (cross-sensor) detection state
+        self.joint_cusum_state = CUSUMState()
+        self.joint_glr_state = GLRState()
+        self.joint_detection = JointChangeDetection(asset_id=asset_id)
+        self.joint_llr_history: Deque[float] = deque(maxlen=200)
         
         logger.info(f"SequentialChangeDetectionService initialized for asset: {asset_id}")
     
@@ -159,6 +174,124 @@ class SequentialChangeDetectionService:
             cusum_alarm, glr_alarm, sensor_trust
         )
         
+        return detection
+
+    def process_joint_observations(
+        self,
+        observations: Dict[str, ResidualObservation],
+        current_regime: OperatingRegime,
+        sensor_trusts: Dict[str, float],
+    ) -> JointChangeDetection:
+        """
+        Cross-sensor fused LLR change detection.
+        
+        Aggregates log-likelihood evidence across sensors to detect
+        coherent system-level changes.
+        """
+        if not self.config.joint_enabled:
+            return self.joint_detection
+        
+        is_transient = current_regime in [
+            OperatingRegime.STARTUP,
+            OperatingRegime.SHUTDOWN,
+            OperatingRegime.TRANSIENT,
+            OperatingRegime.RECOVERY,
+            OperatingRegime.DEFROST,
+        ]
+
+        # Build fused LLR across trusted sensors
+        expected_ll = -1.5
+        fused_llr = 0.0
+        n_sensors = 0
+        n_trusted = 0
+        for sensor_id, obs in observations.items():
+            n_sensors += 1
+            trust = sensor_trusts.get(sensor_id, 1.0)
+            if trust < 0.7:
+                continue
+            n_trusted += 1
+            if obs.log_likelihood is not None:
+                llr = obs.log_likelihood - expected_ll
+                fused_llr += llr * trust
+
+        # Update joint history
+        self.joint_llr_history.append(fused_llr)
+
+        # Update joint CUSUM and GLR
+        joint_cusum_alarm = False
+        joint_glr_alarm = False
+        if not is_transient and n_trusted >= self.config.joint_min_trusted_sensors:
+            # CUSUM on fused LLR
+            k = self.config.cusum_slack
+            self.joint_cusum_state.s_pos = max(
+                0.0, self.joint_cusum_state.s_pos + fused_llr - k
+            )
+            self.joint_cusum_state.s_neg = max(
+                0.0, self.joint_cusum_state.s_neg - fused_llr - k
+            )
+            joint_cusum_alarm = (
+                self.joint_cusum_state.s_pos > self.config.joint_cusum_threshold
+                or self.joint_cusum_state.s_neg > self.config.joint_cusum_threshold
+            )
+
+            # GLR on rolling fused LLR window
+            self.joint_glr_state.window_likelihoods.append(fused_llr)
+            if len(self.joint_glr_state.window_likelihoods) > self.joint_glr_state.max_window_size:
+                self.joint_glr_state.window_likelihoods = self.joint_glr_state.window_likelihoods[-self.joint_glr_state.max_window_size:]
+            if len(self.joint_glr_state.window_likelihoods) >= max(10, self.config.glr_window_size):
+                recent = self.joint_glr_state.window_likelihoods[-self.config.glr_window_size:]
+                glr = -2 * sum(llr for llr in recent)
+                self.joint_glr_state.log_likelihood_ratio = glr
+                joint_glr_alarm = glr > self.config.joint_glr_threshold
+
+        # Update joint detection state
+        detection = self.joint_detection
+        detection.fused_llr = fused_llr
+        detection.threshold = max(self.config.joint_cusum_threshold, self.config.joint_glr_threshold)
+        detection.n_sensors = n_sensors
+        detection.n_trusted_sensors = n_trusted
+
+        # Change score
+        cusum_score = max(self.joint_cusum_state.s_pos, self.joint_cusum_state.s_neg) / (self.config.joint_cusum_threshold * 2)
+        glr_score = self.joint_glr_state.log_likelihood_ratio / (self.config.joint_glr_threshold * 2)
+        detection.change_score = float(max(0.0, min(1.0, max(cusum_score, glr_score))))
+
+        any_alarm = joint_cusum_alarm or joint_glr_alarm
+        if any_alarm:
+            latest_ts = None
+            if observations:
+                latest_ts = max(obs.timestamp for obs in observations.values())
+            if detection.anomaly_start_time is None:
+                detection.anomaly_start_time = latest_ts or datetime.utcnow()
+            current_ts = latest_ts or datetime.utcnow()
+            detection.anomaly_duration_hours = (current_ts - detection.anomaly_start_time).total_seconds() / 3600.0
+        else:
+            if detection.change_score < 0.3:
+                detection.anomaly_start_time = None
+                detection.anomaly_duration_hours = 0.0
+
+        # Stability score from fused LLR history
+        if len(self.joint_llr_history) >= self.config.stability_window:
+            recent = list(self.joint_llr_history)[-self.config.stability_window:]
+            if recent:
+                sign_consistency = max(
+                    sum(1 for v in recent if v >= 0),
+                    sum(1 for v in recent if v < 0),
+                ) / len(recent)
+                magnitude = [abs(v) for v in recent]
+                cv = np.std(magnitude) / (np.mean(magnitude) + 1e-6)
+                magnitude_consistency = 1.0 / (1.0 + cv)
+                detection.stability_score = float(0.5 * sign_consistency + 0.5 * magnitude_consistency)
+
+        detection.change_detected = (
+            any_alarm
+            and detection.anomaly_duration_hours >= self.config.joint_min_persistence_minutes / 60.0
+            and detection.stability_score >= self.config.joint_min_stability_for_alarm
+            and n_trusted >= self.config.joint_min_trusted_sensors
+            and not is_transient
+        )
+        detection.last_updated = datetime.utcnow()
+
         return detection
     
     def _initialize_sensor(self, sensor_id: str, sensor_type: SensorType):
@@ -392,6 +525,14 @@ class SequentialChangeDetectionService:
             "n_sensors_monitored": len(self.detection_states),
             "n_active_changes": len(active),
             "active_sensors": [d.sensor_type.value for d in active],
+            "joint_change": {
+                "change_detected": self.joint_detection.change_detected,
+                "score": self.joint_detection.change_score,
+                "fused_llr": self.joint_detection.fused_llr,
+                "n_sensors": self.joint_detection.n_sensors,
+                "n_trusted_sensors": self.joint_detection.n_trusted_sensors,
+                "duration_hours": self.joint_detection.anomaly_duration_hours,
+            },
             "detectors": {
                 sensor_id: {
                     "change_score": d.change_score,

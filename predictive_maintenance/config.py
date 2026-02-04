@@ -109,6 +109,9 @@ class FalsePositiveBudgetSettings(BaseSettings):
     min_regime_coverage_cycles: int = Field(
         default=2, env="PDM_FP_MIN_REGIME_CYCLES"
     )
+    max_actionable_alarms_per_fleet_per_month: Optional[float] = Field(
+        default=None, env="PDM_FP_MAX_ALARMS_PER_FLEET"
+    )
     
     class Config:
         env_prefix = "PDM_FP_"
@@ -152,6 +155,14 @@ class MetricsSettings(BaseSettings):
         env_prefix = "PDM_METRICS_"
 
 
+class PersistenceSettings(BaseSettings):
+    """Persistence feature flags"""
+    enabled: bool = Field(default=False, env="PDM_PERSISTENCE_ENABLED")
+
+    class Config:
+        env_prefix = "PDM_PERSISTENCE_"
+
+
 class PDMSettings(BaseSettings):
     """Main PDM application settings"""
     environment: str = Field(default="development", env="PDM_ENVIRONMENT")
@@ -170,6 +181,7 @@ class PDMSettings(BaseSettings):
     )
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
     metrics: MetricsSettings = Field(default_factory=MetricsSettings)
+    persistence: PersistenceSettings = Field(default_factory=PersistenceSettings)
     
     @property
     def is_production(self) -> bool:

@@ -53,6 +53,8 @@ class TelemetryRequest(BaseModel):
     supply_air_temp: Optional[float] = Field(None, ge=-50, le=150)
     return_air_temp: Optional[float] = Field(None, ge=-50, le=150)
     ambient_temp: Optional[float] = Field(None, ge=-50, le=150)
+    ambient_humidity: Optional[float] = Field(None, ge=0, le=100)
+    ambient_pressure: Optional[float] = Field(None, ge=800, le=1200)
     zone_temp: Optional[float] = Field(None, ge=-50, le=150)
     
     # Pressures (PSIG)
@@ -69,6 +71,10 @@ class TelemetryRequest(BaseModel):
     heating_valve_pct: Optional[float] = Field(None, ge=0, le=100)
     damper_position_pct: Optional[float] = Field(None, ge=0, le=100)
     reversing_valve_heat: bool = False
+
+    # Context (optional)
+    occupancy_fraction: Optional[float] = Field(None, ge=0, le=1)
+    energy_price: Optional[float] = Field(None, ge=0)
     
     # Extra data
     extra_data: Optional[Dict[str, Any]] = None
@@ -304,6 +310,12 @@ class DeploymentMetricsResponse(BaseModel):
     no_issue_found_rate: float
     lead_time_hours_mean: Optional[float] = None
     lead_time_hours_p50: Optional[float] = None
+    lead_time_hours_p90: Optional[float] = None
+    lead_time_hours_p95: Optional[float] = None
+    lead_time_hours_min: Optional[float] = None
+    lead_time_hours_max: Optional[float] = None
+    lead_time_hours_histogram: Optional[Dict[str, int]] = None
+    precision_at_k: Dict[int, float] = Field(default_factory=dict)
 
 
 class CalibrationMetricsResponse(BaseModel):

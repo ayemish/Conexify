@@ -11,7 +11,7 @@ Reduces false positives by not comparing apples to oranges.
 """
 
 import logging
-from collections import deque
+from collections import deque, defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Deque, Dict, List, Optional, Tuple
@@ -99,6 +99,10 @@ class RegimeSegmentationService:
         
         # Configuration thresholds
         self.config = RegimeConfig()
+
+        # HMM-style refinement state (optional)
+        self.hmm_belief: Dict[OperatingRegime, float] = {}
+        self.validation_history: Deque[Dict[str, Any]] = deque(maxlen=1000)
         
         # Statistics per regime
         self.regime_stats: Dict[OperatingRegime, Dict[str, Any]] = {}
@@ -113,7 +117,26 @@ class RegimeSegmentationService:
         self.history.append(snapshot)
         
         # Determine regime using rule-based logic
-        regime, confidence, reason = self._apply_regime_rules(snapshot)
+        rule_regime, confidence, reason = self._apply_regime_rules(snapshot)
+        rule_confidence = confidence
+        regime = rule_regime
+
+        # Optional HMM-style refinement
+        if self.config.use_hmm_refinement:
+            refined_regime, refined_confidence = self._refine_with_hmm(rule_regime, confidence)
+            # Use refined regime if confidence improves
+            if refined_confidence >= confidence or refined_regime == rule_regime:
+                regime = refined_regime
+                confidence = refined_confidence
+        
+        # Record validation trace
+        self.validation_history.append({
+            "timestamp": snapshot.timestamp,
+            "rule_regime": rule_regime,
+            "final_regime": regime,
+            "rule_confidence": rule_confidence,
+            "final_confidence": confidence,
+        })
         
         # Check for transitions
         previous_regime = self.current_regime
@@ -155,6 +178,62 @@ class RegimeSegmentationService:
                     self.active_segment.avg_ambient_temp = snapshot.ambient_temp
         
         return state
+
+    def _refine_with_hmm(self, rule_regime: OperatingRegime, rule_confidence: float) -> Tuple[OperatingRegime, float]:
+        """
+        Lightweight HMM-style refinement with fixed transition probabilities.
+        This smooths regime noise and provides validation metrics.
+        """
+        regimes = list(OperatingRegime)
+        n = len(regimes)
+        stay_prob = self.config.hmm_stay_probability
+        transition_prob = (1.0 - stay_prob) / max(1, n - 1)
+
+        # Initialize belief if needed
+        if not self.hmm_belief:
+            self.hmm_belief = {r: 1.0 / n for r in regimes}
+            if self.current_regime != OperatingRegime.UNKNOWN:
+                for r in regimes:
+                    self.hmm_belief[r] = 0.0
+                self.hmm_belief[self.current_regime] = 1.0
+
+        # Build transition matrix on the fly (fixed probabilities)
+        prior = {}
+        for r in regimes:
+            prior[r] = 0.0
+            for r_prev, prev_prob in self.hmm_belief.items():
+                trans = stay_prob if r_prev == r else transition_prob
+                prior[r] += prev_prob * trans
+
+        # Emission probabilities based on rule confidence
+        rule_confidence = max(self.config.hmm_confidence_floor, min(1.0, rule_confidence))
+        emission = {r: (1.0 - rule_confidence) / max(1, n - 1) for r in regimes}
+        emission[rule_regime] = rule_confidence
+
+        # Update belief
+        unnorm = {r: prior[r] * emission[r] for r in regimes}
+        total = sum(unnorm.values()) or 1.0
+        self.hmm_belief = {r: unnorm[r] / total for r in regimes}
+
+        # Select refined regime
+        refined_regime = max(self.hmm_belief.items(), key=lambda kv: kv[1])[0]
+        refined_confidence = float(self.hmm_belief[refined_regime])
+        return refined_regime, refined_confidence
+
+    def get_validation_metrics(self) -> Dict[str, Any]:
+        """Summarize regime validation and smoothing behavior."""
+        if not self.validation_history:
+            return {"status": "no_data"}
+
+        total = len(self.validation_history)
+        overrides = sum(1 for v in self.validation_history if v["rule_regime"] != v["final_regime"])
+        avg_conf = float(np.mean([v["final_confidence"] for v in self.validation_history]))
+        return {
+            "samples": total,
+            "hmm_override_rate": overrides / max(total, 1),
+            "avg_final_confidence": avg_conf,
+            "use_hmm_refinement": self.config.use_hmm_refinement,
+        }
     
     def _apply_regime_rules(self, snapshot: TelemetrySnapshot) -> Tuple[OperatingRegime, float, str]:
         """Apply deterministic regime classification rules"""
@@ -457,3 +536,8 @@ class RegimeConfig:
     # Economizer
     economizer_damper_threshold: float = 70.0  # % open
     economizer_compressor_threshold: float = 1.0  # kW
+
+    # HMM-style refinement
+    use_hmm_refinement: bool = False
+    hmm_stay_probability: float = 0.85
+    hmm_confidence_floor: float = 0.2

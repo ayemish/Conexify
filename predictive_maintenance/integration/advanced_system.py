@@ -29,6 +29,7 @@ from ..core.schemas import (
     FaultHypothesis,
     FaultType,
     FeedbackOutcome,
+    JointChangeDetection,
     HierarchicalModelConfig,
     OperatingRegime,
     PDMAlert,
@@ -70,6 +71,8 @@ from ..services.decision_policy_service import (
 from ..services.fingerprint_service import (
     EquipmentFingerprintService,
 )
+from ..services.context_service import ContextService
+from ..services.fleet_budget_service import FleetBudgetService
 
 logger = logging.getLogger(__name__)
 
@@ -122,9 +125,13 @@ class HVACRPdMAdvancedSystem:
     
     def __init__(self, 
                  asset_id: str,
-                 config: Optional[PDMSystemConfig] = None):
+                 config: Optional[PDMSystemConfig] = None,
+                 site_id: Optional[str] = None,
+                 session_factory: Optional[Any] = None):
         self.asset_id = asset_id
         self.config = config or PDMSystemConfig()
+        self.site_id = site_id
+        self.session_factory = session_factory
         
         # Initialize all services
         self.regime_service = RegimeSegmentationService(asset_id)
@@ -136,11 +143,17 @@ class HVACRPdMAdvancedSystem:
         )
         self.fault_hypothesis = FaultHypothesisService(asset_id)
         self.decision_policy = DecisionPolicyService(
-            asset_id, self.config.false_positive_budget
+            asset_id,
+            self.config.false_positive_budget,
+            site_id=self.site_id,
+            session_factory=self.session_factory,
+            fleet_budget_service=FleetBudgetService(self.session_factory),
+            asset_type="hvacr",
         )
         self.fingerprint_service = EquipmentFingerprintService(
             asset_id, self.config.hierarchical_config
         )
+        self.context_service = ContextService()
         
         # State tracking
         self.current_regime: OperatingRegime = OperatingRegime.UNKNOWN
@@ -149,8 +162,11 @@ class HVACRPdMAdvancedSystem:
         
         # Accumulated observations
         self.current_residuals: Dict[SensorType, ResidualObservation] = {}
+        self.current_residuals_by_id: Dict[str, ResidualObservation] = {}
         self.current_trust_scores: Dict[str, SensorTrustScore] = {}
         self.current_changes: Dict[str, ChangePointDetection] = {}
+        self.joint_change: Optional[JointChangeDetection] = None
+        self.last_context: Dict[str, float] = {}
         
         # Latest alert
         self.current_alert: Optional[PDMAlert] = None
@@ -176,6 +192,10 @@ class HVACRPdMAdvancedSystem:
         """
         timestamp = telemetry.get("timestamp", datetime.utcnow())
         self.total_observations += 1
+
+        # Reset per-tick observation containers
+        self.current_residuals = {}
+        self.current_residuals_by_id = {}
         
         # 1. Build telemetry snapshot for regime detection
         snapshot = self._build_snapshot(telemetry, timestamp)
@@ -192,6 +212,7 @@ class HVACRPdMAdvancedSystem:
         
         # 4. Build context for behavior model
         context = self._build_context(telemetry, snapshot)
+        self.last_context = context
         
         # 5. For each sensor, compute residual
         for reading in sensor_readings:
@@ -202,12 +223,7 @@ class HVACRPdMAdvancedSystem:
                 continue  # Skip untrusted sensors
             
             # Get behavior prediction
-            prediction = self.behavior_model.predict(
-                reading.sensor_type,
-                self.current_regime,
-                context,
-                timestamp
-            )
+            prediction = self._predict_behavior(reading, context, timestamp)
             
             # Compute residual
             residual = self.residual_model.compute_residual(
@@ -216,6 +232,7 @@ class HVACRPdMAdvancedSystem:
                 reading.sensor_id
             )
             self.current_residuals[reading.sensor_type] = residual
+            self.current_residuals_by_id[reading.sensor_id] = residual
             
             # Update fingerprint
             self.fingerprint_service.observe(
@@ -249,6 +266,16 @@ class HVACRPdMAdvancedSystem:
                 trust_score,
             )
             self.current_changes[residual.sensor_id] = detection
+
+        # 6b. Joint change detection (cross-sensor fused LLR)
+        trust_scores = {
+            sensor_id: trust.trust_score for sensor_id, trust in self.current_trust_scores.items()
+        }
+        self.joint_change = self.change_detector.process_joint_observations(
+            self.current_residuals_by_id,
+            self.current_regime,
+            trust_scores,
+        )
         
         # 7. Update fault hypothesis periodically
         if self._should_update_hypothesis(timestamp):
@@ -276,6 +303,33 @@ class HVACRPdMAdvancedSystem:
         self.last_regime_update = timestamp
         
         return alert
+
+    def ingest_context(self,
+                       weather: Optional[Dict[str, Any]] = None,
+                       occupancy: Optional[Dict[str, Any]] = None,
+                       tariff: Optional[Dict[str, Any]] = None):
+        """Ingest external context data (weather/occupancy/tariff)."""
+        now = datetime.utcnow()
+        if weather:
+            self.context_service.ingest_weather(
+                asset_id=self.asset_id,
+                timestamp=weather.get("timestamp", now),
+                ambient_temp=weather.get("ambient_temp"),
+                ambient_humidity=weather.get("ambient_humidity"),
+                ambient_pressure=weather.get("ambient_pressure"),
+            )
+        if occupancy:
+            self.context_service.ingest_occupancy(
+                asset_id=self.asset_id,
+                timestamp=occupancy.get("timestamp", now),
+                occupancy_fraction=occupancy.get("occupancy_fraction", 0.0),
+            )
+        if tariff:
+            self.context_service.ingest_tariff(
+                asset_id=self.asset_id,
+                timestamp=tariff.get("timestamp", now),
+                energy_price=tariff.get("energy_price", 0.0),
+            )
     
     def _build_snapshot(self, telemetry: Dict[str, Any], 
                         timestamp: datetime) -> TelemetrySnapshot:
@@ -293,7 +347,7 @@ class HVACRPdMAdvancedSystem:
             discharge_temp=telemetry.get("discharge_temp"),
             supply_air_temp=telemetry.get("supply_air_temp"),
             return_air_temp=telemetry.get("return_air_temp"),
-            ambient_temp=telemetry.get("ambient_temp"),
+            ambient_temp=self.last_context.get("ambient_temp") if self.last_context else telemetry.get("ambient_temp"),
             zone_temp=telemetry.get("zone_temp"),
             setpoint=telemetry.get("setpoint"),
             suction_pressure=telemetry.get("suction_pressure"),
@@ -321,6 +375,7 @@ class HVACRPdMAdvancedSystem:
             "return_air_temp": SensorType.RETURN_AIR_TEMP,
             "supply_air_temp": SensorType.SUPPLY_AIR_TEMP,
             "ambient_temp": SensorType.AMBIENT_TEMP,
+            "ambient_humidity": SensorType.AMBIENT_HUMIDITY,
             "zone_temp": SensorType.ZONE_TEMP,
         }
         
@@ -338,7 +393,7 @@ class HVACRPdMAdvancedSystem:
     def _build_context(self, telemetry: Dict[str, Any],
                        snapshot: TelemetrySnapshot) -> Dict[str, float]:
         """Build context dict for models"""
-        context = {}
+        context = self.context_service.build_context(self.asset_id, telemetry, snapshot.timestamp)
         
         if snapshot.ambient_temp is not None:
             context["ambient_temp"] = snapshot.ambient_temp
@@ -362,6 +417,49 @@ class HVACRPdMAdvancedSystem:
             context["load_proxy"] = 0.5 if snapshot.compressor_on else 0.0
         
         return context
+
+    def _predict_behavior(self,
+                          reading: SensorReading,
+                          context: Dict[str, float],
+                          timestamp: datetime) -> BehaviorPrediction:
+        """Blend behavior model and fingerprint predictions."""
+        base_pred = self.behavior_model.predict(
+            reading.sensor_type,
+            self.current_regime,
+            context,
+            timestamp,
+        )
+        fp_pred, fp_std = self.fingerprint_service.predict_hierarchical(
+            reading.sensor_type,
+            self.current_regime,
+            context,
+        )
+        if np.isnan(base_pred.predicted_value):
+            return BehaviorPrediction(
+                timestamp=timestamp,
+                sensor_type=reading.sensor_type,
+                predicted_value=fp_pred,
+                prediction_std=fp_std,
+                regime=self.current_regime,
+                load_proxy=context.get("load_proxy"),
+                model_confidence=self.fingerprint_service.local_adaptation.adaptation_confidence,
+            )
+        # Weight blending based on fingerprint readiness
+        fp_ready = self.fingerprint_service.is_fingerprint_ready()
+        w_fp = 0.6 if fp_ready else 0.3
+        w_model = 1.0 - w_fp
+        combined = w_model * base_pred.predicted_value + w_fp * fp_pred
+        combined_std = np.sqrt((w_model * base_pred.prediction_std) ** 2 + (w_fp * fp_std) ** 2)
+        confidence = max(base_pred.model_confidence, self.fingerprint_service.local_adaptation.adaptation_confidence)
+        return BehaviorPrediction(
+            timestamp=timestamp,
+            sensor_type=reading.sensor_type,
+            predicted_value=combined,
+            prediction_std=combined_std,
+            regime=self.current_regime,
+            load_proxy=context.get("load_proxy"),
+            model_confidence=confidence,
+        )
     
     def _should_update_hypothesis(self, timestamp: datetime) -> bool:
         """Check if we should update fault hypothesis"""
@@ -385,6 +483,10 @@ class HVACRPdMAdvancedSystem:
         any_change = any(d.change_detected for d in self.current_changes.values())
         max_change_score = max([d.change_score for d in self.current_changes.values()], default=0.0)
         max_persistence = max([d.anomaly_duration_hours for d in self.current_changes.values()], default=0.0)
+        if self.joint_change:
+            any_change = any_change or self.joint_change.change_detected
+            max_change_score = max(max_change_score, self.joint_change.change_score)
+            max_persistence = max(max_persistence, self.joint_change.anomaly_duration_hours)
         n_sensors_change = sum(1 for d in self.current_changes.values() if d.change_score > 0.3)
         
         # Get hypothesis
@@ -416,7 +518,8 @@ class HVACRPdMAdvancedSystem:
             top_fault_probability=top_prob,
             is_diagnosis_concentrated=is_concentrated,
             ambient_temp=telemetry.get("ambient_temp"),
-            load_proxy=telemetry.get("load_proxy"),
+            load_proxy=self.last_context.get("load_proxy"),
+            joint_change=self.joint_change,
         )
     
     def record_feedback(self, alert_id: str, outcome: FeedbackOutcome,
@@ -457,10 +560,18 @@ class HVACRPdMAdvancedSystem:
                 for d in self.current_changes.values()
                 if d.change_score > 0.3
             ],
+            "joint_change": {
+                "change_detected": self.joint_change.change_detected,
+                "score": self.joint_change.change_score,
+                "n_sensors": self.joint_change.n_sensors,
+                "n_trusted_sensors": self.joint_change.n_trusted_sensors,
+                "duration_hours": self.joint_change.anomaly_duration_hours,
+            } if self.joint_change else None,
             "current_hypothesis": self.fault_hypothesis.get_hypothesis_summary(),
             "current_alert": self.current_alert.to_operator_dict() if self.current_alert else None,
             "fingerprint_ready": self.fingerprint_service.is_fingerprint_ready(),
             "policy_summary": self.decision_policy.get_policy_summary(),
+            "regime_validation": self.regime_service.get_validation_metrics(),
         }
     
     def get_deployment_metrics(self,
@@ -506,7 +617,9 @@ class HVACRPdMAdvancedSystem:
 
 def create_pdm_system(asset_id: str,
                       max_alarms_per_month: float = 0.3,
-                      max_fa_rate: float = 0.05) -> HVACRPdMAdvancedSystem:
+                      max_fa_rate: float = 0.05,
+                      site_id: Optional[str] = None,
+                      session_factory: Optional[Any] = None) -> HVACRPdMAdvancedSystem:
     """
     Factory function to create a configured PDM system.
     
@@ -527,4 +640,4 @@ def create_pdm_system(asset_id: str,
         false_positive_budget=budget,
     )
     
-    return HVACRPdMAdvancedSystem(asset_id, config)
+    return HVACRPdMAdvancedSystem(asset_id, config, site_id=site_id, session_factory=session_factory)

@@ -20,7 +20,7 @@ This is where operational false positive rate is controlled.
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -35,9 +35,22 @@ from ..core.schemas import (
     FaultHypothesis,
     FaultType,
     FeedbackOutcome,
+    JointChangeDetection,
     OperatingRegime,
     PDMAlert,
     SensorTrustScore,
+)
+from ..services.fleet_budget_service import FleetBudgetService
+
+try:
+    from sqlalchemy.orm import Session  # type: ignore
+except Exception:  # pragma: no cover
+    Session = None  # type: ignore
+
+from ..persistence.repositories import (
+    AlertRepository,
+    CalibrationRepository,
+    FeedbackRepository,
 )
 
 logger = logging.getLogger(__name__)
@@ -75,6 +88,9 @@ class DecisionContext:
     ambient_temp: Optional[float] = None
     load_proxy: Optional[float] = None
 
+    # Joint (cross-sensor) change detection
+    joint_change: Optional[JointChangeDetection] = None
+
 
 class DecisionPolicyService:
     """
@@ -87,9 +103,21 @@ class DecisionPolicyService:
     4. Track and respect false positive budget
     """
     
-    def __init__(self, asset_id: str, budget: Optional[FalsePositiveBudget] = None):
+    def __init__(
+        self,
+        asset_id: str,
+        budget: Optional[FalsePositiveBudget] = None,
+        site_id: Optional[str] = None,
+        session_factory: Optional[Callable[[], Session]] = None,
+        fleet_budget_service: Optional[FleetBudgetService] = None,
+        asset_type: str = "hvacr",
+    ):
         self.asset_id = asset_id
         self.budget = budget or FalsePositiveBudget()
+        self.site_id = site_id
+        self.session_factory = session_factory
+        self.fleet_budget_service = fleet_budget_service
+        self.asset_type = asset_type
         
         # Alert history for calibration
         self.alert_history: List[PDMAlert] = []
@@ -101,6 +129,8 @@ class DecisionPolicyService:
         # Maps raw model confidence -> calibrated FA probability
         self.fa_calibration_curve: Dict[float, float] = {}
         self._initialize_default_calibration()
+        self._loaded_feedback_ids: set = set()
+        self._load_persistent_calibration()
         
         # Monthly tracking
         self.current_month_start: datetime = datetime.utcnow().replace(day=1, hour=0, minute=0, second=0)
@@ -112,6 +142,61 @@ class DecisionPolicyService:
         self.actionable_repeat_window_hours: float = 2.0
         
         logger.info(f"DecisionPolicyService initialized for asset: {asset_id}")
+
+    def _load_persistent_calibration(self):
+        """Load calibration curve and feedback from persistence, if available."""
+        if self.session_factory is None:
+            return
+        try:
+            session = self.session_factory()
+        except Exception as exc:  # pragma: no cover
+            logger.warning(f"Calibration load skipped (session error): {exc}")
+            return
+        try:
+            calib_repo = CalibrationRepository(session)
+            state = calib_repo.get_for_asset(self.asset_id) or calib_repo.get_for_asset_type(self.asset_type)
+            if state and state.calibration_curve:
+                curve = {}
+                for k, v in state.calibration_curve.items():
+                    try:
+                        curve[float(k)] = float(v)
+                    except Exception:
+                        continue
+                if curve:
+                    self.fa_calibration_curve.update(curve)
+                    self.calibration_dataset.last_calibration = state.last_calibrated_at
+            # Load feedback records for calibration
+            feedback_repo = FeedbackRepository(session)
+            records = feedback_repo.get_for_calibration(asset_type=self.asset_type, limit=2000)
+            for fb in records:
+                if fb.alert_id in self._loaded_feedback_ids:
+                    continue
+                self._loaded_feedback_ids.add(fb.alert_id)
+                try:
+                    predicted = {}
+                    if fb.predicted_fault_distribution:
+                        for k, v in fb.predicted_fault_distribution.items():
+                            try:
+                                predicted[FaultType(k)] = float(v)
+                            except Exception:
+                                continue
+                    self.calibration_dataset.records.append(
+                        AlarmFeedback(
+                            alert_id=fb.alert_id,
+                            asset_id=fb.asset_id,
+                            outcome=FeedbackOutcome(fb.outcome),
+                            confirmed_fault_type=FaultType(fb.confirmed_fault_type) if fb.confirmed_fault_type else None,
+                            feedback_notes=fb.notes or "",
+                            alarm_time=fb.alert_timestamp,
+                            feedback_time=fb.feedback_at,
+                            predicted_fault_distribution=predicted,
+                            predicted_false_alarm_prob=fb.predicted_false_alarm_prob or 0.0,
+                        )
+                    )
+                except Exception:
+                    continue
+        finally:
+            session.close()
     
     def _initialize_default_calibration(self):
         """Initialize default FA calibration curve (conservative)"""
@@ -240,10 +325,18 @@ class DecisionPolicyService:
             self.monthly_no_issue_found = 0
 
         # Enforce monthly alert budget (per unit)
-        if self.monthly_alerts >= self.budget.max_actionable_alarms_per_unit_per_month:
+        per_unit_count = self.monthly_alerts
+        if self.fleet_budget_service is not None:
+            try:
+                per_unit_count = self.fleet_budget_service.count_actionable_for_asset(
+                    self.asset_id, context.timestamp
+                )
+            except Exception:
+                per_unit_count = self.monthly_alerts
+        if per_unit_count >= self.budget.max_actionable_alarms_per_unit_per_month:
             return False, (
                 f"Monthly alert budget exceeded: "
-                f"{self.monthly_alerts}/{self.budget.max_actionable_alarms_per_unit_per_month}"
+                f"{per_unit_count}/{self.budget.max_actionable_alarms_per_unit_per_month}"
             )
 
         # Compute calibrated false alarm probability
@@ -254,8 +347,17 @@ class DecisionPolicyService:
         if fa_prob > self.budget.max_false_alarm_probability:
             return False, f"Estimated FA probability {fa_prob:.1%} exceeds budget {self.budget.max_false_alarm_probability:.1%}"
         
-        # Check monthly alarm count (if tracking)
-        # This would use fleet-level tracking in production
+        # Fleet/site-level budget enforcement
+        if self.fleet_budget_service is not None and self.site_id:
+            snapshot = self.fleet_budget_service.count_actionable_for_site(self.site_id, context.timestamp)
+            fleet_limit = self.budget.max_actionable_alarms_per_fleet_per_month
+            if fleet_limit is None and snapshot.total_assets > 0:
+                fleet_limit = self.budget.max_actionable_alarms_per_unit_per_month * snapshot.total_assets
+            if fleet_limit is not None and snapshot.total_actionable_alerts >= fleet_limit:
+                return False, (
+                    f"Fleet alert budget exceeded: "
+                    f"{snapshot.total_actionable_alerts}/{fleet_limit}"
+                )
         
         return True, ""
     
@@ -405,6 +507,9 @@ class DecisionPolicyService:
         self.alert_history.append(alert)
         self.monthly_alerts += 1
         self.active_actionable_alert = alert
+        if self.fleet_budget_service is not None:
+            self.fleet_budget_service.record_actionable_alert(self.asset_id, context.timestamp)
+        self._persist_alert(alert)
         
         logger.info(f"Actionable alert generated: {context.top_fault.value if context.top_fault else 'unknown'} "
                    f"with confidence {context.top_fault_probability:.0%}")
@@ -525,6 +630,7 @@ class DecisionPolicyService:
             if alert.alert_id == alert_id:
                 alert.feedback_outcome = outcome
                 alert.feedback_notes = notes
+                alert.feedback_at = datetime.utcnow()
                 
                 if outcome == FeedbackOutcome.NO_ISSUE_FOUND:
                     self.monthly_no_issue_found += 1
@@ -542,9 +648,48 @@ class DecisionPolicyService:
                     predicted_false_alarm_prob=alert.false_alarm_probability,
                 )
                 self.calibration_dataset.records.append(feedback)
+                self._persist_feedback(feedback)
                 
                 logger.info(f"Recorded feedback for alert {alert_id}: {outcome.value}")
-                break
+                return
+
+        # If not in memory, try to persist directly (use DB record if available)
+        if self.session_factory is not None:
+            try:
+                session = self.session_factory()
+                try:
+                    repo = AlertRepository(session)
+                    alert_model = repo.get_by_id(alert_id)
+                    if alert_model:
+                        predicted = {}
+                        if alert_model.fault_beliefs:
+                            for k, v in alert_model.fault_beliefs.items():
+                                try:
+                                    predicted[FaultType(k)] = float(v)
+                                except Exception:
+                                    continue
+                        feedback = AlarmFeedback(
+                            alert_id=alert_id,
+                            asset_id=alert_model.asset_id,
+                            outcome=outcome,
+                            confirmed_fault_type=confirmed_fault,
+                            feedback_notes=notes,
+                            alarm_time=alert_model.created_at,
+                            feedback_time=datetime.utcnow(),
+                            predicted_fault_distribution=predicted,
+                            predicted_false_alarm_prob=alert_model.false_alarm_probability or 0.0,
+                        )
+                        self.calibration_dataset.records.append(feedback)
+                        self._persist_feedback(feedback)
+                        # Update alert model with feedback metadata
+                        repo.add_feedback(alert_id=alert_id, outcome=outcome.value, notes=notes)
+                        session.commit()
+                        logger.info(f"Recorded feedback from DB for alert {alert_id}: {outcome.value}")
+                        return
+                finally:
+                    session.close()
+            except Exception as exc:  # pragma: no cover
+                logger.warning(f"Record feedback fallback failed: {exc}")
     
     def recalibrate(self):
         """Recalibrate false alarm probability from feedback data"""
@@ -580,6 +725,7 @@ class DecisionPolicyService:
         if new_calibration:
             self.fa_calibration_curve.update(new_calibration)
             self.calibration_dataset.last_calibration = datetime.utcnow()
+            self._persist_calibration_state(len(records))
             logger.info(f"Recalibrated FA curve with {len(records)} feedback records")
     
     def get_deployment_metrics(self, 
@@ -607,8 +753,49 @@ class DecisionPolicyService:
         months = days / 30.0
         alarms_per_unit_per_month = len(actionable) / (n_units * max(months, 0.1))
         
-        # Lead time (would need resolution data)
-        lead_times = []  # Would compute from alert time to confirmed failure
+        # Lead time (proxy: alert created -> feedback or resolution time)
+        lead_times = []
+        for alert in actionable:
+            end_time = alert.feedback_at or alert.resolved_at
+            if end_time and alert.created_at:
+                hours = (end_time - alert.created_at).total_seconds() / 3600.0
+                if hours >= 0:
+                    lead_times.append(hours)
+
+        lead_times_sorted = sorted(lead_times)
+        def _percentile(values: List[float], pct: float) -> Optional[float]:
+            if not values:
+                return None
+            k = int(round((len(values) - 1) * pct))
+            return float(values[k])
+
+        # Lead time histogram (hours)
+        histogram = None
+        if lead_times_sorted:
+            bins = [0, 6, 24, 72, 168, 336, 720]
+            labels = ["0-6h", "6-24h", "1-3d", "3-7d", "1-2w", "2-4w", ">4w"]
+            counts = {label: 0 for label in labels}
+            for lt in lead_times_sorted:
+                placed = False
+                for i in range(len(bins) - 1):
+                    if bins[i] <= lt < bins[i + 1]:
+                        counts[labels[i]] += 1
+                        placed = True
+                        break
+                if not placed:
+                    counts[labels[-1]] += 1
+            histogram = counts
+
+        # Precision@K for actionable alerts with feedback
+        precision_at_k: Dict[int, float] = {}
+        feedback_actionable = [a for a in actionable if a.feedback_outcome is not None]
+        if feedback_actionable:
+            sorted_by_conf = sorted(feedback_actionable, key=lambda a: a.confidence, reverse=True)
+            for k in [1, 3, 5]:
+                if len(sorted_by_conf) >= k:
+                    top_k = sorted_by_conf[:k]
+                    confirmed = sum(1 for a in top_k if a.feedback_outcome == FeedbackOutcome.CONFIRMED_FAULT)
+                    precision_at_k[k] = confirmed / k
         
         return DeploymentMetrics(
             period_start=period_start,
@@ -622,6 +809,12 @@ class DecisionPolicyService:
             no_issue_found_rate=no_issue_rate,
             lead_time_hours_mean=np.mean(lead_times) if lead_times else None,
             lead_time_hours_p50=np.median(lead_times) if lead_times else None,
+            lead_time_hours_p90=_percentile(lead_times_sorted, 0.9),
+            lead_time_hours_p95=_percentile(lead_times_sorted, 0.95),
+            lead_time_hours_min=min(lead_times_sorted) if lead_times_sorted else None,
+            lead_time_hours_max=max(lead_times_sorted) if lead_times_sorted else None,
+            lead_time_hours_histogram=histogram,
+            precision_at_k=precision_at_k,
         )
     
     def get_policy_summary(self) -> Dict[str, Any]:
@@ -637,3 +830,99 @@ class DecisionPolicyService:
             "last_calibration": self.calibration_dataset.last_calibration.isoformat() 
                                if self.calibration_dataset.last_calibration else None,
         }
+
+    def _persist_alert(self, alert: PDMAlert):
+        """Persist alert to database if session factory is configured."""
+        if self.session_factory is None:
+            return
+        try:
+            session = self.session_factory()
+        except Exception as exc:  # pragma: no cover
+            logger.warning(f"Persist alert skipped (session error): {exc}")
+            return
+        try:
+            repo = AlertRepository(session)
+            repo.create(
+                asset_id=alert.asset_id,
+                alert_id=alert.alert_id,
+                alert_type=alert.alert_type.value,
+                severity=alert.severity.value,
+                false_alarm_probability=alert.false_alarm_probability,
+                confidence=alert.confidence,
+                primary_fault=alert.primary_fault.value if alert.primary_fault else None,
+                secondary_fault=alert.secondary_fault.value if alert.secondary_fault else None,
+                fault_beliefs={k.value: v for k, v in alert.fault_beliefs.items()},
+                evidence_summary=alert.evidence_summary,
+                recommended_action=alert.recommended_action,
+                action_urgency=alert.action_urgency,
+                energy_penalty_estimate_pct=alert.energy_penalty_estimate_pct,
+                downtime_risk_score=alert.downtime_risk_score,
+                comfort_risk_score=alert.comfort_risk_score,
+                estimated_cost_if_ignored=alert.estimated_cost_if_ignored,
+                regime_at_detection=alert.regime_at_detection.value if alert.regime_at_detection else None,
+                ambient_temp_at_detection=alert.ambient_temp_at_detection,
+                created_at=alert.created_at,
+                resolved_at=alert.resolved_at,
+                feedback_outcome=alert.feedback_outcome.value if alert.feedback_outcome else None,
+                feedback_notes=alert.feedback_notes,
+                feedback_at=alert.feedback_at,
+            )
+            session.commit()
+        except Exception as exc:  # pragma: no cover
+            session.rollback()
+            logger.warning(f"Persist alert failed: {exc}")
+        finally:
+            session.close()
+
+    def _persist_feedback(self, feedback: AlarmFeedback):
+        """Persist feedback to database if session factory is configured."""
+        if self.session_factory is None:
+            return
+        try:
+            session = self.session_factory()
+        except Exception as exc:  # pragma: no cover
+            logger.warning(f"Persist feedback skipped (session error): {exc}")
+            return
+        try:
+            repo = FeedbackRepository(session)
+            repo.create(
+                alert_id=feedback.alert_id,
+                asset_id=feedback.asset_id,
+                outcome=feedback.outcome.value,
+                confirmed_fault_type=feedback.confirmed_fault_type.value if feedback.confirmed_fault_type else None,
+                notes=feedback.feedback_notes,
+                alert_timestamp=feedback.alarm_time,
+                predicted_fault_distribution={k.value: v for k, v in feedback.predicted_fault_distribution.items()},
+                predicted_false_alarm_prob=feedback.predicted_false_alarm_prob,
+            )
+            session.commit()
+        except Exception as exc:  # pragma: no cover
+            session.rollback()
+            logger.warning(f"Persist feedback failed: {exc}")
+        finally:
+            session.close()
+
+    def _persist_calibration_state(self, n_records: int):
+        """Persist calibration curve to database if session factory is configured."""
+        if self.session_factory is None:
+            return
+        try:
+            session = self.session_factory()
+        except Exception as exc:  # pragma: no cover
+            logger.warning(f"Persist calibration skipped (session error): {exc}")
+            return
+        try:
+            repo = CalibrationRepository(session)
+            repo.upsert(
+                asset_id=self.asset_id,
+                asset_type=self.asset_type,
+                calibration_curve={str(k): float(v) for k, v in self.fa_calibration_curve.items()},
+                n_records=n_records,
+                last_calibrated_at=self.calibration_dataset.last_calibration,
+            )
+            session.commit()
+        except Exception as exc:  # pragma: no cover
+            session.rollback()
+            logger.warning(f"Persist calibration failed: {exc}")
+        finally:
+            session.close()

@@ -1,0 +1,168 @@
+# PDM - Predictive Maintenance System
+# Docker Compose for local development and testing
+
+version: '3.8'
+
+services:
+  # ==========================================================================
+  # PDM API Server
+  # ==========================================================================
+  pdm-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: development
+    container_name: pdm-api
+    ports:
+      - "8000:8000"
+      - "9090:9090"
+    environment:
+      - PDM_ENVIRONMENT=development
+      - PDM_DEBUG=true
+      - PDM_DB_HOST=pdm-db
+      - PDM_DB_PORT=5432
+      - PDM_DB_NAME=pdm
+      - PDM_DB_USER=pdm_user
+      - PDM_DB_PASSWORD=pdm_password
+      - PDM_REDIS_HOST=pdm-redis
+      - PDM_REDIS_PORT=6379
+      - PDM_LOG_LEVEL=DEBUG
+      - PDM_LOG_FORMAT=text
+      - PDM_METRICS_ENABLED=true
+    volumes:
+      - .:/app/predictive_maintenance
+    depends_on:
+      pdm-db:
+        condition: service_healthy
+      pdm-redis:
+        condition: service_healthy
+    networks:
+      - pdm-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # ==========================================================================
+  # PostgreSQL Database
+  # ==========================================================================
+  pdm-db:
+    image: postgres:15-alpine
+    container_name: pdm-db
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_DB=pdm
+      - POSTGRES_USER=pdm_user
+      - POSTGRES_PASSWORD=pdm_password
+    volumes:
+      - pdm-db-data:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+    networks:
+      - pdm-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pdm_user -d pdm"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ==========================================================================
+  # Redis
+  # ==========================================================================
+  pdm-redis:
+    image: redis:7-alpine
+    container_name: pdm-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - pdm-redis-data:/data
+    networks:
+      - pdm-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    command: redis-server --appendonly yes
+
+  # ==========================================================================
+  # Prometheus (Metrics)
+  # ==========================================================================
+  pdm-prometheus:
+    image: prom/prometheus:v2.47.0
+    container_name: pdm-prometheus
+    ports:
+      - "9091:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - pdm-prometheus-data:/prometheus
+    networks:
+      - pdm-network
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.enable-lifecycle'
+
+  # ==========================================================================
+  # Grafana (Dashboards)
+  # ==========================================================================
+  pdm-grafana:
+    image: grafana/grafana:10.1.0
+    container_name: pdm-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - pdm-grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+    networks:
+      - pdm-network
+    depends_on:
+      - pdm-prometheus
+
+  # ==========================================================================
+  # Test Runner (optional)
+  # ==========================================================================
+  pdm-test:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: development
+    container_name: pdm-test
+    environment:
+      - PDM_ENVIRONMENT=test
+      - PDM_DB_HOST=pdm-db
+      - PDM_DB_NAME=pdm_test
+      - PDM_DB_USER=pdm_user
+      - PDM_DB_PASSWORD=pdm_password
+      - PDM_REDIS_HOST=pdm-redis
+    volumes:
+      - .:/app/predictive_maintenance
+    depends_on:
+      - pdm-db
+      - pdm-redis
+    networks:
+      - pdm-network
+    command: pytest tests/ -v --tb=short
+    profiles:
+      - test
+
+# ==========================================================================
+# Networks
+# ==========================================================================
+networks:
+  pdm-network:
+    driver: bridge
+
+# ==========================================================================
+# Volumes
+# ==========================================================================
+volumes:
+  pdm-db-data:
+  pdm-redis-data:
+  pdm-prometheus-data:
+  pdm-grafana-data:

@@ -237,6 +237,27 @@ class FeedbackModel(Base):
     )
 
 
+class CalibrationStateModel(Base):
+    """Persisted calibration curve/state"""
+    __tablename__ = "pdm_calibration_state"
+    
+    id = Column(UUID(as_uuid=False), primary_key=True, default=generate_uuid)
+    asset_id = Column(String(100), ForeignKey("pdm_assets.asset_id"), nullable=True, index=True)
+    asset_type = Column(String(50), nullable=True)
+    
+    # Calibration curve mapping raw confidence -> actual FA probability
+    calibration_curve = Column(JSONB, default=dict)
+    n_records = Column(Integer, default=0)
+    
+    last_calibrated_at = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    __table_args__ = (
+        Index("ix_pdm_calibration_asset_type", "asset_type"),
+    )
+
+
 class RegimeSegmentModel(Base):
     """Operating regime segments for analysis"""
     __tablename__ = "pdm_regime_segments"

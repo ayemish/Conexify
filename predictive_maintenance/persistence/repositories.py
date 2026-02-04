@@ -16,6 +16,7 @@ from .models import (
     AlertModel,
     FingerprintModel,
     FeedbackModel,
+    CalibrationStateModel,
     RegimeSegmentModel,
     ChangeDetectionModel,
     FaultHypothesisModel,
@@ -244,6 +245,29 @@ class AlertRepository(BaseRepository):
             AlertModel.created_at >= start,
             AlertModel.created_at < end
         ).count()
+
+    def count_by_type_and_month_for_site(
+        self,
+        site_id: str,
+        alert_type: str,
+        year: int,
+        month: int
+    ) -> int:
+        """Count alerts by type for a site (fleet) in a specific month"""
+        start = datetime(year, month, 1)
+        if month == 12:
+            end = datetime(year + 1, 1, 1)
+        else:
+            end = datetime(year, month + 1, 1)
+        
+        return self.session.query(AlertModel).join(
+            AssetModel, AlertModel.asset_id == AssetModel.asset_id
+        ).filter(
+            AssetModel.site_id == site_id,
+            AlertModel.alert_type == alert_type,
+            AlertModel.created_at >= start,
+            AlertModel.created_at < end
+        ).count()
     
     def get_feedback_summary(
         self,
@@ -369,6 +393,49 @@ class FeedbackRepository(BaseRepository):
         
         results = query.group_by(FeedbackModel.outcome).all()
         return {outcome: count for outcome, count in results}
+
+
+class CalibrationRepository(BaseRepository):
+    """Repository for calibration state persistence"""
+    
+    def get_for_asset(self, asset_id: str) -> Optional[CalibrationStateModel]:
+        return self.session.query(CalibrationStateModel).filter(
+            CalibrationStateModel.asset_id == asset_id
+        ).first()
+    
+    def get_for_asset_type(self, asset_type: str) -> Optional[CalibrationStateModel]:
+        return self.session.query(CalibrationStateModel).filter(
+            CalibrationStateModel.asset_type == asset_type
+        ).order_by(CalibrationStateModel.updated_at.desc()).first()
+    
+    def upsert(
+        self,
+        asset_id: Optional[str],
+        asset_type: Optional[str],
+        calibration_curve: Dict[str, float],
+        n_records: int,
+        last_calibrated_at: Optional[datetime]
+    ) -> CalibrationStateModel:
+        existing = None
+        if asset_id:
+            existing = self.get_for_asset(asset_id)
+        if not existing and asset_type:
+            existing = self.get_for_asset_type(asset_type)
+        if existing:
+            existing.calibration_curve = calibration_curve
+            existing.n_records = n_records
+            existing.last_calibrated_at = last_calibrated_at
+            existing.updated_at = datetime.utcnow()
+            return existing
+        state = CalibrationStateModel(
+            asset_id=asset_id,
+            asset_type=asset_type,
+            calibration_curve=calibration_curve,
+            n_records=n_records,
+            last_calibrated_at=last_calibrated_at,
+        )
+        self.session.add(state)
+        return state
 
 
 class RegimeSegmentRepository(BaseRepository):

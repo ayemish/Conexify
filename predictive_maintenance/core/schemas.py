@@ -124,6 +124,9 @@ class FalsePositiveBudget:
     min_anomaly_persistence_hours: float = 6.0
     min_regime_coverage_cycles: int = 2
     min_sensor_trust_score: float = 0.8
+
+    # Optional fleet/site budget caps (across assets)
+    max_actionable_alarms_per_fleet_per_month: Optional[float] = None
     
     realized_alarms_this_month: int = 0
     realized_no_issue_found: int = 0
@@ -154,6 +157,7 @@ class FalsePositiveBudget:
             "min_anomaly_persistence_hours": self.min_anomaly_persistence_hours,
             "min_regime_coverage_cycles": self.min_regime_coverage_cycles,
             "min_sensor_trust_score": self.min_sensor_trust_score,
+            "max_actionable_alarms_per_fleet_per_month": self.max_actionable_alarms_per_fleet_per_month,
             "realized_alarms_this_month": self.realized_alarms_this_month,
             "realized_no_issue_found": self.realized_no_issue_found,
             "last_calibration": self.last_calibration.isoformat() if self.last_calibration else None,
@@ -348,6 +352,22 @@ class ChangeDetectionResult:
                 self.n_regimes_observed >= min_regimes)
 
 
+@dataclass
+class JointChangeDetection:
+    """Joint change detection across multiple sensors (fused LLR)."""
+    asset_id: str = ""
+    change_detected: bool = False
+    change_score: float = 0.0
+    fused_llr: float = 0.0
+    threshold: float = 0.0
+    n_sensors: int = 0
+    n_trusted_sensors: int = 0
+    anomaly_start_time: Optional[datetime] = None
+    anomaly_duration_hours: float = 0.0
+    stability_score: float = 1.0
+    last_updated: datetime = field(default_factory=datetime.utcnow)
+
+
 # Backward-compatible alias used across services
 ChangePointDetection = ChangeDetectionResult
 
@@ -468,6 +488,7 @@ class MaintenanceAlert:
     
     feedback_outcome: Optional[FeedbackOutcome] = None
     feedback_notes: str = ""
+    feedback_at: Optional[datetime] = None
 
     def to_operator_dict(self) -> Dict[str, Any]:
         """Operator-friendly alert representation"""
@@ -536,3 +557,9 @@ class DeploymentMetrics:
     no_issue_found_rate: float
     lead_time_hours_mean: Optional[float] = None
     lead_time_hours_p50: Optional[float] = None
+    lead_time_hours_p90: Optional[float] = None
+    lead_time_hours_p95: Optional[float] = None
+    lead_time_hours_min: Optional[float] = None
+    lead_time_hours_max: Optional[float] = None
+    lead_time_hours_histogram: Optional[Dict[str, int]] = None
+    precision_at_k: Dict[int, float] = field(default_factory=dict)

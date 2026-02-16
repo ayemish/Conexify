@@ -18,6 +18,7 @@ This is where operational false positive rate is controlled.
 """
 
 import logging
+import math
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -39,6 +40,10 @@ from ..core.schemas import (
     OperatingRegime,
     PDMAlert,
     SensorTrustScore,
+)
+from ..core.decision_contracts import (
+    GateEvaluation,
+    HardGate,
 )
 from ..services.fleet_budget_service import FleetBudgetService
 
@@ -102,6 +107,14 @@ class DecisionPolicyService:
     3. Require confidence in diagnosis
     4. Track and respect false positive budget
     """
+    _GATE_ORDER: List[HardGate] = [
+        HardGate.SENSOR_TRUST,
+        HardGate.STEADY_STATE_OR_CHANGE,
+        HardGate.CHANGE_PRESENT,
+        HardGate.PERSISTENCE,
+        HardGate.DIAGNOSIS_CONFIDENCE,
+        HardGate.BUDGET,
+    ]
     
     def __init__(
         self,
@@ -140,6 +153,7 @@ class DecisionPolicyService:
         # Active actionable alert tracking (prevent alert spam)
         self.active_actionable_alert: Optional[PDMAlert] = None
         self.actionable_repeat_window_hours: float = 2.0
+        self.last_gate_evaluations: List[GateEvaluation] = []
         
         logger.info(f"DecisionPolicyService initialized for asset: {asset_id}")
 
@@ -219,46 +233,154 @@ class DecisionPolicyService:
         
         Returns PDMAlert with type, severity, and recommendations.
         """
+        gates: List[GateEvaluation] = []
+
         # Check sensor trust first (Layer 1)
         sensor_alert = self._check_sensor_issues(context)
+        sensor_gate_passed = sensor_alert is None
+        sensor_reason = (
+            "Sensor trust sufficient for analysis"
+            if sensor_gate_passed
+            else f"Minimum sensor trust {context.min_sensor_trust:.0%} below critical threshold 50%"
+        )
+        gates.append(
+            GateEvaluation(
+                gate=HardGate.SENSOR_TRUST,
+                passed=sensor_gate_passed,
+                reason=sensor_reason,
+                metric=context.min_sensor_trust,
+                threshold=0.5,
+            )
+        )
+        # Check sensor trust first (Layer 1)
         if sensor_alert:
             self.active_actionable_alert = None
+            self._finalize_gate_evaluations(gates)
             return sensor_alert
         
         # Check if we should suppress based on regime
-        if not context.is_steady_state and not context.any_change_detected:
+        steady_or_change = context.is_steady_state or context.any_change_detected
+        gates.append(
+            GateEvaluation(
+                gate=HardGate.STEADY_STATE_OR_CHANGE,
+                passed=steady_or_change,
+                reason=(
+                    "Steady-state or active change condition satisfied"
+                    if steady_or_change
+                    else "System in transient regime without active changes"
+                ),
+                metric=1.0 if steady_or_change else 0.0,
+                threshold=1.0,
+            )
+        )
+        if not steady_or_change:
             self.active_actionable_alert = None
+            self._finalize_gate_evaluations(gates)
             return self._create_no_alert(context, "System in transient regime; monitoring only")
         
         # Check change detection (Layer 2)
+        gates.append(
+            GateEvaluation(
+                gate=HardGate.CHANGE_PRESENT,
+                passed=context.any_change_detected,
+                reason=(
+                    "Persistent change detected"
+                    if context.any_change_detected
+                    else "No persistent change detected"
+                ),
+                metric=context.max_change_score,
+                threshold=0.0,
+            )
+        )
         if not context.any_change_detected:
             self.active_actionable_alert = None
+            self._finalize_gate_evaluations(gates)
             return self._create_no_alert(context, "No persistent change detected")
         
         # Check persistence criteria
         persistence_ok, persistence_reason = self._check_persistence(context)
+        gates.append(
+            GateEvaluation(
+                gate=HardGate.PERSISTENCE,
+                passed=persistence_ok,
+                reason=persistence_reason if not persistence_ok else "Persistence criteria satisfied",
+                metric=context.max_persistence_hours,
+                threshold=self.budget.min_anomaly_persistence_hours,
+            )
+        )
         if not persistence_ok:
             self.active_actionable_alert = None
+            self._finalize_gate_evaluations(gates)
             return self._create_watch_alert(context, persistence_reason)
         
         # Check diagnosis confidence (Layer 3)
         confidence_ok, confidence_reason = self._check_diagnosis_confidence(context)
+        gates.append(
+            GateEvaluation(
+                gate=HardGate.DIAGNOSIS_CONFIDENCE,
+                passed=confidence_ok,
+                reason=confidence_reason if not confidence_ok else "Diagnosis confidence criteria satisfied",
+                metric=context.top_fault_probability,
+                threshold=self.budget.min_confidence_for_actionable,
+            )
+        )
         if not confidence_ok:
             self.active_actionable_alert = None
+            self._finalize_gate_evaluations(gates)
             return self._create_watch_alert(context, confidence_reason)
 
         # If an actionable alert is already active for this event, reuse it
         if self._should_reuse_active_alert(context):
+            gates.append(
+                GateEvaluation(
+                    gate=HardGate.BUDGET,
+                    passed=True,
+                    reason="Reusing active actionable alert within repeat window",
+                    metric=self._calibrate_fa_probability(context.top_fault_probability),
+                    threshold=self.budget.max_false_alarm_probability,
+                )
+            )
+            self._finalize_gate_evaluations(gates)
             return self.active_actionable_alert
         
         # Check false positive budget
         budget_ok, budget_reason = self._check_budget(context)
+        gates.append(
+            GateEvaluation(
+                gate=HardGate.BUDGET,
+                passed=budget_ok,
+                reason=budget_reason if not budget_ok else "False-positive budget constraints satisfied",
+                metric=self._calibrate_fa_probability(context.top_fault_probability),
+                threshold=self.budget.max_false_alarm_probability,
+            )
+        )
         if not budget_ok:
             self.active_actionable_alert = None
+            self._finalize_gate_evaluations(gates)
             return self._create_watch_alert(context, budget_reason)
         
         # All checks passed - generate actionable alert
+        self._finalize_gate_evaluations(gates)
         return self._create_actionable_alert(context)
+
+    def _finalize_gate_evaluations(self, gates: List[GateEvaluation]):
+        """Store ordered gate evaluations; mark any non-evaluated gates as skipped."""
+        present = {g.gate for g in gates}
+        for gate in self._GATE_ORDER:
+            if gate not in present:
+                gates.append(
+                    GateEvaluation(
+                        gate=gate,
+                        passed=False,
+                        reason="Skipped due to earlier gate failure",
+                    )
+                )
+        gates.sort(key=lambda g: self._GATE_ORDER.index(g.gate))
+        self.last_gate_evaluations = list(gates)
+
+    def get_last_gate_evaluations(self) -> List[GateEvaluation]:
+        """Return the gate evaluations recorded during the latest evaluation."""
+        return list(self.last_gate_evaluations)
 
     def _should_reuse_active_alert(self, context: DecisionContext) -> bool:
         """Reuse active actionable alert within a short window to avoid alert spam."""
@@ -333,11 +455,22 @@ class DecisionPolicyService:
                 )
             except Exception:
                 per_unit_count = self.monthly_alerts
-        if per_unit_count >= self.budget.max_actionable_alarms_per_unit_per_month:
+        effective_unit_limit = self._effective_unit_alert_limit()
+        if per_unit_count >= effective_unit_limit:
             return False, (
                 f"Monthly alert budget exceeded: "
-                f"{per_unit_count}/{self.budget.max_actionable_alarms_per_unit_per_month}"
+                f"{per_unit_count}/{effective_unit_limit} "
+                f"(configured={self.budget.max_actionable_alarms_per_unit_per_month:.2f}/unit/month)"
             )
+
+        # Enforce post-feedback no-issue-found cap
+        if per_unit_count > 0:
+            no_issue_rate = self.monthly_no_issue_found / per_unit_count
+            if no_issue_rate > self.budget.max_no_issue_found_rate:
+                return False, (
+                    "No-issue-found rate exceeds budget: "
+                    f"{no_issue_rate:.1%}/{self.budget.max_no_issue_found_rate:.1%}"
+                )
 
         # Compute calibrated false alarm probability
         raw_confidence = context.top_fault_probability
@@ -352,14 +485,31 @@ class DecisionPolicyService:
             snapshot = self.fleet_budget_service.count_actionable_for_site(self.site_id, context.timestamp)
             fleet_limit = self.budget.max_actionable_alarms_per_fleet_per_month
             if fleet_limit is None and snapshot.total_assets > 0:
-                fleet_limit = self.budget.max_actionable_alarms_per_unit_per_month * snapshot.total_assets
+                # Use the raw fractional budget (e.g. 0.3/unit/month) for fleet
+                # calculation, NOT the per-unit ceiling.  This preserves the
+                # intended fleet-wide false-positive budget.
+                fleet_limit = float(
+                    self.budget.max_actionable_alarms_per_unit_per_month
+                    * snapshot.total_assets
+                )
+            if fleet_limit is not None:
+                fleet_limit = float(max(1, math.ceil(float(fleet_limit))))
             if fleet_limit is not None and snapshot.total_actionable_alerts >= fleet_limit:
                 return False, (
                     f"Fleet alert budget exceeded: "
-                    f"{snapshot.total_actionable_alerts}/{fleet_limit}"
+                    f"{snapshot.total_actionable_alerts}/{fleet_limit} "
+                    f"(configured={self.budget.max_actionable_alarms_per_unit_per_month:.2f}/unit × "
+                    f"{snapshot.total_assets} units)"
                 )
         
         return True, ""
+
+    def _effective_unit_alert_limit(self) -> int:
+        """Convert configured monthly alert budget into an enforceable integer cap."""
+        configured = float(self.budget.max_actionable_alarms_per_unit_per_month)
+        if configured <= 0:
+            return 0
+        return max(1, int(math.ceil(configured)))
     
     def _calibrate_fa_probability(self, raw_confidence: float) -> float:
         """
@@ -473,6 +623,20 @@ class DecisionPolicyService:
         
         # Determine urgency
         urgency = self._determine_urgency(context, severity)
+
+        # Escalation gate: if no-issue-found rate is approaching budget,
+        # force human review before dispatch to protect false-positive budget.
+        nif_escalate = False
+        if self.monthly_alerts > 0:
+            nif_rate = self.monthly_no_issue_found / self.monthly_alerts
+            nif_threshold = self.budget.max_no_issue_found_rate
+            if nif_rate >= nif_threshold * 0.75:
+                nif_escalate = True
+                urgency = "human_review"
+                evidence_summary.append(
+                    f"NIF rate {nif_rate:.0%} approaching budget {nif_threshold:.0%}; "
+                    "routed for human review before dispatch"
+                )
         
         # Get recommendation from hypothesis
         recommendation = ""

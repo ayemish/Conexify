@@ -7,11 +7,22 @@ Centralized configuration using Pydantic settings with environment variable supp
 import os
 from typing import List, Optional
 from functools import lru_cache
-from pydantic import BaseSettings, Field, validator
+from pydantic import AliasChoices, Field, validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Load .env early so nested BaseSettings classes see values even when the
+# app is imported outside the CLI entrypoint.
+try:
+    from dotenv import load_dotenv
+    _env_path = os.path.join(os.path.dirname(__file__), ".env")
+    if os.path.exists(_env_path):
+        load_dotenv(_env_path)
+except Exception:
+    pass
 
 
 class DatabaseSettings(BaseSettings):
-    """Database configuration"""
+    """Database configuration — PostgreSQL with SQLite fallback for dev"""
     host: str = Field(default="localhost", env="PDM_DB_HOST")
     port: int = Field(default=5432, env="PDM_DB_PORT")
     name: str = Field(default="pdm", env="PDM_DB_NAME")
@@ -19,19 +30,46 @@ class DatabaseSettings(BaseSettings):
     password: str = Field(default="", env="PDM_DB_PASSWORD")
     pool_size: int = Field(default=5, env="PDM_DB_POOL_SIZE")
     max_overflow: int = Field(default=10, env="PDM_DB_MAX_OVERFLOW")
+    sqlite_path: str = Field(default="pdm_dev.db", env="PDM_DB_SQLITE_PATH")
+    use_sqlite: Optional[bool] = Field(default=None, env="PDM_DB_USE_SQLITE")
     
     @property
+    def _should_use_sqlite(self) -> bool:
+        """Auto-detect: use SQLite if explicitly requested or PostgreSQL unavailable."""
+        if self.use_sqlite is True:
+            return True
+        if self.use_sqlite is False:
+            return False
+        # Auto-detect: try PostgreSQL, fall back to SQLite
+        try:
+            import socket
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(1)
+            s.connect((self.host, self.port))
+            s.close()
+            return False
+        except (OSError, ConnectionRefusedError):
+            return True
+
+    @property
     def url(self) -> str:
-        """Build database URL"""
+        """Build database URL — PostgreSQL or SQLite fallback"""
+        if self._should_use_sqlite:
+            return f"sqlite:///{self.sqlite_path}"
         return f"postgresql://{self.user}:{self.password}@{self.host}:{self.port}/{self.name}"
     
     @property
     def async_url(self) -> str:
         """Build async database URL"""
+        if self._should_use_sqlite:
+            return f"sqlite+aiosqlite:///{self.sqlite_path}"
         return f"postgresql+asyncpg://{self.user}:{self.password}@{self.host}:{self.port}/{self.name}"
     
-    class Config:
-        env_prefix = "PDM_DB_"
+    model_config = SettingsConfigDict(
+        env_prefix="PDM_DB_",
+        extra="ignore",
+        case_sensitive=False,
+    )
 
 
 class RedisSettings(BaseSettings):
@@ -53,8 +91,11 @@ class RedisSettings(BaseSettings):
         auth = f":{self.password}@" if self.password else ""
         return f"{protocol}://{auth}{self.host}:{self.port}/{self.db}"
     
-    class Config:
-        env_prefix = "PDM_REDIS_"
+    model_config = SettingsConfigDict(
+        env_prefix="PDM_REDIS_",
+        extra="ignore",
+        case_sensitive=False,
+    )
 
 
 class APISettings(BaseSettings):
@@ -85,8 +126,11 @@ class APISettings(BaseSettings):
             return [o.strip() for o in v.split(",") if o.strip()]
         return v
     
-    class Config:
-        env_prefix = "PDM_API_"
+    model_config = SettingsConfigDict(
+        env_prefix="PDM_API_",
+        extra="ignore",
+        case_sensitive=False,
+    )
 
 
 class FalsePositiveBudgetSettings(BaseSettings):
@@ -113,8 +157,11 @@ class FalsePositiveBudgetSettings(BaseSettings):
         default=None, env="PDM_FP_MAX_ALARMS_PER_FLEET"
     )
     
-    class Config:
-        env_prefix = "PDM_FP_"
+    model_config = SettingsConfigDict(
+        env_prefix="PDM_FP_",
+        extra="ignore",
+        case_sensitive=False,
+    )
 
 
 class ChangeDetectionSettings(BaseSettings):
@@ -126,8 +173,11 @@ class ChangeDetectionSettings(BaseSettings):
     min_steady_state_regimes: int = Field(default=2, env="PDM_CD_MIN_REGIMES")
     stability_window: int = Field(default=50, env="PDM_CD_STABILITY_WINDOW")
     
-    class Config:
-        env_prefix = "PDM_CD_"
+    model_config = SettingsConfigDict(
+        env_prefix="PDM_CD_",
+        extra="ignore",
+        case_sensitive=False,
+    )
 
 
 class LoggingSettings(BaseSettings):
@@ -136,8 +186,11 @@ class LoggingSettings(BaseSettings):
     format: str = Field(default="json", env="PDM_LOG_FORMAT")  # json or text
     include_trace_id: bool = Field(default=True, env="PDM_LOG_TRACE_ID")
     
-    class Config:
-        env_prefix = "PDM_LOG_"
+    model_config = SettingsConfigDict(
+        env_prefix="PDM_LOG_",
+        extra="ignore",
+        case_sensitive=False,
+    )
 
 
 class MetricsSettings(BaseSettings):
@@ -151,16 +204,79 @@ class MetricsSettings(BaseSettings):
     jaeger_host: str = Field(default="localhost", env="PDM_JAEGER_HOST")
     jaeger_port: int = Field(default=6831, env="PDM_JAEGER_PORT")
     
-    class Config:
-        env_prefix = "PDM_METRICS_"
+    model_config = SettingsConfigDict(
+        env_prefix="PDM_METRICS_",
+        extra="ignore",
+        case_sensitive=False,
+    )
+
+
+class OpenAISettings(BaseSettings):
+    """OpenAI integration settings"""
+    api_key: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "OPENAI_API_KEY",
+            "openai_api_key",
+            "PDM_OPENAI_API_KEY",
+        ),
+    )
+    embedding_model: str = Field(default="text-embedding-3-small", env="PDM_OPENAI_EMBEDDING_MODEL")
+    chat_model: str = Field(
+        default="gpt-4o-mini",
+        validation_alias=AliasChoices(
+            "PDM_OPENAI_CHAT_MODEL",
+            "OPENAI_MODEL",
+            "openai_model",
+        ),
+    )
+    transcription_model: str = Field(default="whisper-1", env="PDM_OPENAI_TRANSCRIBE_MODEL")
+    max_context_docs: int = Field(default=6, env="PDM_OPENAI_MAX_CONTEXT_DOCS")
+    scenario_crewai_enabled: bool = Field(default=False, env="PDM_OPENAI_SCENARIO_CREWAI_ENABLED")
+    
+    model_config = SettingsConfigDict(
+        env_prefix="PDM_OPENAI_",
+        extra="ignore",
+        case_sensitive=False,
+    )
+
+
+class TEESettings(BaseSettings):
+    """TEE / Release Gate integration settings"""
+    enabled: bool = Field(default=False, env="TEE_ENABLED")
+    release_gate_url: str = Field(default="http://vcda-release-gate:8080", env="TEE_RELEASE_GATE_URL")
+    release_policy_name: Optional[str] = Field(default=None, env="TEE_RELEASE_POLICY_NAME")
+    release_policy_namespace: Optional[str] = Field(default=None, env="TEE_RELEASE_POLICY_NAMESPACE")
+    dataset_binding_name: Optional[str] = Field(default=None, env="TEE_DATASET_BINDING_NAME")
+    dataset_binding_namespace: Optional[str] = Field(default=None, env="TEE_DATASET_BINDING_NAMESPACE")
+
+    # Attestation / Keylime
+    keylime_enabled: bool = Field(default=False, env="TEE_KEYLIME_ENABLED")
+    keylime_verifier_url: str = Field(default="http://keylime-verifier:8881", env="TEE_KEYLIME_VERIFIER_URL")
+    keylime_fail_closed: bool = Field(default=True, env="TEE_KEYLIME_FAIL_CLOSED")
+    keylime_required_ima_policy_hashes: Optional[str] = Field(default=None, env="TEE_KEYLIME_REQUIRED_IMA_HASHES")
+
+    # Enclave runtime / IO
+    enclave_runtime: str = Field(default="kata", env="TEE_ENCLAVE_RUNTIME")
+    egress_allowlist: List[str] = Field(default_factory=list, env="TEE_EGRESS_ALLOWLIST")
+    encryption_key: Optional[str] = Field(default=None, env="TEE_ENCRYPTION_KEY")
+
+    model_config = SettingsConfigDict(
+        env_prefix="TEE_",
+        extra="ignore",
+        case_sensitive=False,
+    )
 
 
 class PersistenceSettings(BaseSettings):
     """Persistence feature flags"""
     enabled: bool = Field(default=False, env="PDM_PERSISTENCE_ENABLED")
 
-    class Config:
-        env_prefix = "PDM_PERSISTENCE_"
+    model_config = SettingsConfigDict(
+        env_prefix="PDM_PERSISTENCE_",
+        extra="ignore",
+        case_sensitive=False,
+    )
 
 
 class PDMSettings(BaseSettings):
@@ -181,7 +297,9 @@ class PDMSettings(BaseSettings):
     )
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
     metrics: MetricsSettings = Field(default_factory=MetricsSettings)
+    openai: OpenAISettings = Field(default_factory=OpenAISettings)
     persistence: PersistenceSettings = Field(default_factory=PersistenceSettings)
+    tee: TEESettings = Field(default_factory=TEESettings)
     
     @property
     def is_production(self) -> bool:
@@ -191,11 +309,14 @@ class PDMSettings(BaseSettings):
     def is_development(self) -> bool:
         return self.environment == "development"
     
-    class Config:
-        env_prefix = "PDM_"
-        env_file = ".env"
-        env_file_encoding = "utf-8"
-        case_sensitive = False
+    model_config = SettingsConfigDict(
+        env_prefix="PDM_",
+        # Always resolve .env relative to this package, not process CWD.
+        env_file=os.path.join(os.path.dirname(__file__), ".env"),
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
 
 
 @lru_cache()

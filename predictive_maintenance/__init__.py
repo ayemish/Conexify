@@ -8,8 +8,6 @@ A comprehensive predictive maintenance system for HVAC/R equipment using:
 - Multi-agent collaboration via CrewAI
 - Explicit false positive budget management
 
-This project is SEPARATE from the RMN (Retail Media Network) project.
-
 Project Structure:
 ==================
 

@@ -1,0 +1,141 @@
+id: pb-refrigerant-leak-001
+name: Refrigerant Leak Response
+version: "1.0.0"
+description: |
+  Response playbook for detected refrigerant leaks.
+  HIGH risk tier - requires human approval before control actions.
+  Triggers F-gas compliance logging.
+
+asset_class: REFRIGERATION
+fault_type: low_refrigerant
+risk_tier: HIGH
+
+triggers:
+  - event_type: alert
+    expr: "fault_type == 'low_refrigerant' and confidence > 0.7"
+  - event_type: telemetry
+    expr: "superheat > 20 and subcool < 3"
+
+preconditions:
+  - expr: "not incident_active(asset_id, 'refrigerant_leak')"
+    description: "No existing leak incident for this asset"
+  - expr: "compressor_status == 'running'"
+    description: "Compressor must be running for valid readings"
+
+steps:
+  - id: read_refrigerant_state
+    type: READ
+    description: "Capture current refrigerant circuit state"
+    params:
+      point_ids:
+        - suction_pressure
+        - discharge_pressure
+        - suction_temp
+        - discharge_temp
+        - superheat
+        - subcool
+        - compressor_amps
+        - evaporator_temp
+        - condenser_temp
+
+  - id: compute_leak_estimate
+    type: COMPUTE
+    description: "Estimate refrigerant loss based on superheat/subcool"
+    params:
+      expression: "max(0, (superheat - 12) * 0.5)"
+      output: estimated_leak_percent
+
+  - id: log_fgas_detection
+    type: COMPUTE
+    description: "Log F-gas compliance event"
+    params:
+      expression: "'fgas_leak_detected'"
+      output: compliance_event
+
+  - id: reduce_capacity
+    type: WRITE_POINT
+    description: "Reduce compressor capacity to prevent damage"
+    params:
+      point_id: compressor_capacity_limit
+      value: 70
+      ttl_seconds: 7200
+    requires_approval: true
+    on_error: ESCALATE
+
+  - id: create_urgent_ticket
+    type: CREATE_TICKET
+    description: "Create urgent work order for refrigerant technician"
+    params:
+      title: "URGENT: Refrigerant Leak Detected - ${asset_id}"
+      description: |
+        Autopilot has detected a refrigerant leak requiring immediate attention.
+        
+        ## Detection Evidence
+        - Superheat: ${superheat}°F (normal: 8-12°F)
+        - Subcool: ${subcool}°F (normal: 8-12°F)
+        - Suction Pressure: ${suction_pressure} psi
+        - Discharge Pressure: ${discharge_pressure} psi
+        - Estimated Loss: ${estimated_leak_percent}%
+        
+        ## Actions Taken
+        - Compressor capacity limited to 70%
+        
+        ## Required Actions
+        1. Dispatch certified refrigerant technician
+        2. Perform leak detection and repair
+        3. Recover and recharge refrigerant per F-gas requirements
+        4. Document all quantities for compliance logbook
+        
+        This is an F-gas regulated asset. All refrigerant transactions must be logged.
+      priority: P1
+      tags:
+        - refrigerant
+        - leak
+        - fgas
+        - urgent
+
+  - id: notify_emergency
+    type: NOTIFY
+    description: "Send emergency notifications"
+    params:
+      recipients:
+        - refrigerant_technician
+        - facilities_manager
+        - compliance_officer
+      channel: sms
+      message: |
+        URGENT: Refrigerant leak detected on ${asset_id} at ${site_id}.
+        Estimated loss: ${estimated_leak_percent}%. 
+        Work order ${ticket_id} created. Immediate response required.
+
+  - id: escalate_to_vendor
+    type: ESCALATE
+    description: "Escalate to refrigerant service vendor"
+    params:
+      type: vendor
+      reason: "Refrigerant leak requiring certified technician"
+      vendor_id: refrigerant_service
+
+verification:
+  - expr: "compressor_capacity_limit <= 70"
+    window_sec: 300
+    must_hold: true
+    description: "Capacity limit applied successfully"
+  - expr: "discharge_pressure < discharge_pressure_before * 1.1"
+    window_sec: 900
+    must_hold: false
+    description: "Discharge pressure not increasing rapidly"
+
+escalation:
+  on_failure: NOTIFY
+  notify:
+    - store_manager
+    - regional_engineer
+  message: "Refrigerant leak response failed - immediate manual intervention required"
+
+evidence:
+  include_telemetry: true
+  before_window_sec: 7200
+  after_window_sec: 3600
+  attach_to_ticket: true
+  fgas_compliance: true

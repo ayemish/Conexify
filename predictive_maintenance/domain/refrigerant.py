@@ -168,10 +168,11 @@ class RefrigerantProperties:
 R410A = RefrigerantProperties(
     name="R-410A",
     formula="CH2F2/CHF2CF3",
-    # Fitted Antoine coefficients for R-410A
-    antoine_A=7.0552,
-    antoine_B=1152.8,
-    antoine_C=388.5,
+    # Fitted Antoine coefficients for R-410A (P in psia, T in °F)
+    # Calibrated to typical PT chart points: 40°F≈118 psig, 80°F≈250 psig, 120°F≈400 psig.
+    antoine_A=3.536288280836719,
+    antoine_B=209.89454876319058,
+    antoine_C=108.5,
     t_min=-60,
     t_max=150,
     t_critical=162.0,

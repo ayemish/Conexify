@@ -8,11 +8,36 @@ import logging
 from contextlib import contextmanager, asynccontextmanager
 from typing import Generator, AsyncGenerator, Optional
 
-from sqlalchemy import create_engine, event, text
+from sqlalchemy import create_engine, event, text, String, Text
 from sqlalchemy.orm import sessionmaker, Session, declarative_base
 from sqlalchemy.pool import QueuePool
 
 logger = logging.getLogger(__name__)
+
+# ── SQLite compatibility for PostgreSQL-specific types ──────────────
+# Register type compilation rules so UUID/JSONB columns map to TEXT in SQLite.
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID, JSONB as PG_JSONB
+from sqlalchemy.ext.compiler import compiles
+
+
+@compiles(PG_UUID, "sqlite")
+def compile_uuid_sqlite(type_, compiler, **kw):
+    return "VARCHAR(36)"
+
+
+@compiles(PG_JSONB, "sqlite")
+def compile_jsonb_sqlite(type_, compiler, **kw):
+    return "TEXT"
+
+
+try:
+    from pgvector.sqlalchemy import Vector  # type: ignore
+
+    @compiles(Vector, "sqlite")
+    def compile_vector_sqlite(type_, compiler, **kw):
+        return "TEXT"
+except Exception:
+    pass
 
 # Try async support
 ASYNC_AVAILABLE = False
@@ -54,14 +79,21 @@ def get_engine(database_url: Optional[str] = None, **kwargs):
         from ..config import settings
         database_url = settings.database.url
     
-    default_kwargs = {
-        "poolclass": QueuePool,
-        "pool_size": 5,
-        "max_overflow": 10,
-        "pool_pre_ping": True,
-        "pool_recycle": 3600,
-        "echo": False,
-    }
+    is_sqlite = database_url.startswith("sqlite")
+    if is_sqlite:
+        default_kwargs = {
+            "echo": False,
+            "connect_args": {"check_same_thread": False},
+        }
+    else:
+        default_kwargs = {
+            "poolclass": QueuePool,
+            "pool_size": 5,
+            "max_overflow": 10,
+            "pool_pre_ping": True,
+            "pool_recycle": 3600,
+            "echo": False,
+        }
     default_kwargs.update(kwargs)
     
     _engine = create_engine(database_url, **default_kwargs)
@@ -200,6 +232,16 @@ def init_db(drop_existing: bool = False):
     if drop_existing:
         logger.warning("Dropping all existing tables!")
         Base.metadata.drop_all(bind=engine)
+
+    # Ensure pgvector extension exists (Postgres only)
+    db_url = str(engine.url)
+    if not db_url.startswith("sqlite"):
+        try:
+            with engine.connect() as conn:
+                conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+                conn.commit()
+        except Exception as e:
+            logger.warning(f"pgvector extension creation skipped: {e}")
     
     Base.metadata.create_all(bind=engine)
     logger.info("Database schema initialized")
@@ -215,6 +257,12 @@ async def init_db_async(drop_existing: bool = False):
         if drop_existing:
             logger.warning("Dropping all existing tables!")
             await conn.run_sync(Base.metadata.drop_all)
+
+        # Ensure pgvector extension exists (Postgres only)
+        try:
+            await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+        except Exception as e:
+            logger.warning(f"pgvector extension creation skipped: {e}")
         
         await conn.run_sync(Base.metadata.create_all)
     

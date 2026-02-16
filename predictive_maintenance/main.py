@@ -6,7 +6,18 @@ Command-line interface and application bootstrapping.
 
 import argparse
 import logging
+import os
 import sys
+
+# Load .env file if present (before any config reads)
+try:
+    from dotenv import load_dotenv
+    _env_path = os.path.join(os.path.dirname(__file__), ".env")
+    if os.path.exists(_env_path):
+        load_dotenv(_env_path)
+except ImportError:
+    pass  # python-dotenv not installed; rely on shell-exported env vars
+
 
 def setup_environment():
     """Set up environment and logging"""
@@ -22,8 +33,11 @@ def setup_environment():
     return settings
 
 
-def run_api_server():
-    """Run the FastAPI server"""
+def run_api_server(host: str = None, port: int = None, workers: int = None, reload: bool = None):
+    """Run the FastAPI server.
+
+    CLI arguments override config settings when provided.
+    """
     import uvicorn
     from .config import settings
     
@@ -31,10 +45,10 @@ def run_api_server():
     
     uvicorn.run(
         "predictive_maintenance.api.app:app",
-        host=settings.api.host,
-        port=settings.api.port,
-        workers=settings.api.workers,
-        reload=settings.api.reload,
+        host=host or settings.api.host,
+        port=port or settings.api.port,
+        workers=workers or settings.api.workers,
+        reload=reload if reload is not None else settings.api.reload,
         log_level=settings.logging.level.lower(),
     )
 
@@ -88,7 +102,12 @@ Examples:
     args = parser.parse_args()
     
     if args.command == "serve":
-        run_api_server()
+        run_api_server(
+            host=args.host,
+            port=args.port,
+            workers=args.workers,
+            reload=args.reload if args.reload else None,
+        )
     elif args.command == "init-db":
         run_init_db()
     elif args.command == "test":

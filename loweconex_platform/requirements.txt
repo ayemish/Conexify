@@ -1,0 +1,18 @@
+# Loweconex Platform Dependencies
+# Core (required)
+redis>=5.0.0
+pydantic>=2.0.0
+
+# CrewAI (optional - platform runs in deterministic mode without it)
+crewai>=0.28.0
+
+# Data connectors (optional)
+requests>=2.31.0
+openpyxl>=3.1.0
+sqlalchemy>=2.0.0
+
+# PDF export (optional - falls back to text export)
+reportlab>=4.0.0
+
+# Testing
+pytest>=7.4.0

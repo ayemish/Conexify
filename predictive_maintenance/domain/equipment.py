@@ -24,12 +24,12 @@ class EquipmentType(str, Enum):
 @dataclass
 class EquipmentSpecs:
     """Base equipment specifications"""
-    equipment_type: EquipmentType
     manufacturer: str
     model_number: str
     
     # Capacity
     nominal_capacity_tons: float
+    equipment_type: EquipmentType = EquipmentType.RTU
     nominal_capacity_btuh: float = 0.0
     
     # Electrical
@@ -304,7 +304,7 @@ def efficiency_degradation_curve(age_years: float, maintenance_factor: float = 1
         Efficiency multiplier (1.0 = new, lower = degraded)
     """
     # Base degradation rate (unmaintained)
-    base_rate = 0.03  # 3% per year
+    base_rate = 0.05  # 5% per year
     
     # Maintenance reduces degradation
     effective_rate = base_rate * (1 - 0.7 * maintenance_factor)

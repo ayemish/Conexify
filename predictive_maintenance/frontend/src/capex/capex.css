@@ -1,0 +1,129 @@
+@tailwind components;
+@tailwind utilities;
+
+/* ── Scoped CapEx utility classes ─────────────────────────────── */
+/* These mirror the original CapEx index.css but scoped to .capex-scope */
+
+.capex-scope {
+  font-family: 'Inter', sans-serif;
+  color: #111827;
+  line-height: 1.5;
+}
+
+.capex-scope *,
+.capex-scope *::before,
+.capex-scope *::after {
+  box-sizing: border-box;
+}
+
+.capex-scope .score-excellent { background: #dcfce7; color: #166534; }
+.capex-scope .score-good { background: #dbeafe; color: #1e40af; }
+.capex-scope .score-fair { background: #fef9c3; color: #854d0e; }
+.capex-scope .score-poor { background: #ffedd5; color: #9a3412; }
+.capex-scope .score-critical { background: #fee2e2; color: #991b1b; }
+
+.capex-scope .btn-primary {
+  background: #2563eb;
+  color: #fff;
+  font-weight: 500;
+  padding: 0.5rem 1rem;
+  border-radius: 0.5rem;
+  border: none;
+  cursor: pointer;
+  transition: background-color 150ms;
+}
+.capex-scope .btn-primary:hover {
+  background: #1d4ed8;
+}
+
+.capex-scope .btn-secondary {
+  background: #e5e7eb;
+  color: #1f2937;
+  font-weight: 500;
+  padding: 0.5rem 1rem;
+  border-radius: 0.5rem;
+  border: none;
+  cursor: pointer;
+  transition: background-color 150ms;
+}
+.capex-scope .btn-secondary:hover {
+  background: #d1d5db;
+}
+
+.capex-scope .card {
+  background: #fff;
+  border-radius: 0.75rem;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
+  border: 1px solid #e5e7eb;
+  padding: 1.5rem;
+}
+
+.capex-scope .input {
+  width: 100%;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid #d1d5db;
+  border-radius: 0.5rem;
+  outline: none;
+  transition: all 150ms;
+  font-size: 0.875rem;
+}
+.capex-scope .input:focus {
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.3);
+}
+
+.capex-scope .select {
+  width: 100%;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid #d1d5db;
+  border-radius: 0.5rem;
+  outline: none;
+  transition: all 150ms;
+  background: #fff;
+  font-size: 0.875rem;
+}
+.capex-scope .select:focus {
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.3);
+}
+
+.capex-scope .table-header {
+  background: #f9fafb;
+  text-align: left;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #4b5563;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.capex-scope .badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.125rem 0.625rem;
+  border-radius: 9999px;
+  font-size: 0.75rem;
+  font-weight: 500;
+}
+
+.capex-scope .progress-bar {
+  height: 0.5rem;
+  background: #e5e7eb;
+  border-radius: 9999px;
+  overflow: hidden;
+}
+
+.capex-scope .progress-fill {
+  height: 100%;
+  border-radius: 9999px;
+  transition: all 500ms;
+}
+
+/* Reset some defaults inside capex scope */
+.capex-scope button {
+  font-family: 'Inter', sans-serif;
+}
+
+.capex-scope table {
+  border-collapse: collapse;
+}

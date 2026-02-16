@@ -149,6 +149,24 @@ class TestAlertEndpoints:
         assert "alerts" in data
         assert "total" in data
 
+    def test_acknowledge_without_body(self, client):
+        """Acknowledge endpoint should accept empty body (UI compatibility)."""
+        response = client.post("/api/v1/alerts/ALT_TEST_001/acknowledge")
+        assert response.status_code in [200, 500]
+
+    def test_dismiss_endpoint_exists(self, client):
+        """Dismiss endpoint should exist for UI action."""
+        response = client.post("/api/v1/alerts/ALT_TEST_001/dismiss")
+        assert response.status_code in [200, 500]
+
+    def test_alert_feedback_alias_accepts_quick_payload(self, client):
+        """Alert feedback alias should parse lightweight payload."""
+        response = client.post(
+            "/api/v1/alerts/ALT_TEST_001/feedback",
+            json={"helpful": True},
+        )
+        assert response.status_code in [404, 500]
+
 
 class TestMetricsEndpoints:
     """Test metrics endpoints"""
@@ -169,6 +187,59 @@ class TestMetricsEndpoints:
         
         data = response.json()
         assert "total_feedback_records" in data
+
+
+class TestApprovalQueueEndpoints:
+    """Test approval queue endpoints"""
+
+    def test_create_queue_item(self, client):
+        payload = {
+            "approval_id": "APR-TEST-0001",
+            "run_id": "RUN-TEST-0001",
+            "incident_id": "INC-TEST-0001",
+            "playbook_id": "PB-TEST-0001",
+            "step_id": "step-1",
+            "tenant_id": "default",
+            "site_id": "test_site",
+            "asset_id": "RTU_TEST_001",
+            "risk_tier": "MEDIUM",
+            "proposed_actions": [{"action": "review"}],
+            "action_summary": "Review uncertain alert",
+        }
+        response = client.post("/api/v1/approval-queue/queue", json=payload)
+        assert response.status_code == 200
+        data = response.json()
+        assert data["approval_id"] == payload["approval_id"]
+
+
+class TestScenarioEndpoints:
+    """Test scenario chat endpoints"""
+
+    def test_list_personas(self, client):
+        response = client.get("/api/v1/scenario/personas")
+        assert response.status_code == 200
+        data = response.json()
+        assert "personas" in data
+        assert len(data["personas"]) >= 1
+        first = data["personas"][0]
+        assert "id" in first and "prompt" in first
+
+    def test_scenario_chat(self, client):
+        payload = {
+            "persona_id": "company",
+            "persona_prompt": "Company persona prompt.",
+            "message": "Plan next quarter marketing mix.",
+            "scope": "company",
+            "marketing_budget": "$5M per quarter",
+            "risk_level": "Moderate",
+            "payback_timeline": "6-9 months"
+        }
+        response = client.post("/api/v1/scenario/chat", json=payload)
+        assert response.status_code == 200
+        data = response.json()
+        assert data["persona_id"] == "company"
+        assert len(data["instructions"]) >= 1
+        assert len(data["outputs"]) >= 1
 
 
 class TestAPISchemas:

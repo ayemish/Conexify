@@ -37,6 +37,7 @@ from .protocols import (
     ProtocolMessageBus, VotingProtocol, EscalationProtocol, ConsensusProtocol,
     ProtocolMessage, ProtocolMessageType, MessagePriority,
 )
+from ..services.rag_service import get_rag_service
 
 logger = logging.getLogger(__name__)
 
@@ -406,6 +407,7 @@ class CollaborativeDecisionWorkflow:
                 "confidence": context.confidence,
                 "duration_seconds": context.get_duration_seconds(),
             })
+            self._index_agent_summary(context)
             
         except Exception as e:
             context.transition_to(WorkflowState.FAILED)
@@ -420,6 +422,41 @@ class CollaborativeDecisionWorkflow:
                 self.completed_workflows = self.completed_workflows[-self.max_completed // 2:]
         
         return context
+
+    def _index_agent_summary(self, context: WorkflowContext):
+        """Index a summary of agent results into the RAG store."""
+        summary = {
+            "workflow_id": context.workflow_id,
+            "site_id": context.site_id,
+            "asset_id": context.asset_id,
+            "final_decision": context.final_decision.value if context.final_decision else None,
+            "confidence": context.confidence,
+            "regime": context.regime_result.result_data.get("regime") if context.regime_result else None,
+            "min_trust": context.trust_result.result_data.get("min_trust") if context.trust_result else None,
+            "changes": [
+                r.result_data for r in context.behavior_results if r.result_type == "change_detection"
+            ],
+            "diagnosis": context.diagnosis_result.result_data if context.diagnosis_result else None,
+            "votes": [
+                {
+                    "agent_id": v.agent_id,
+                    "agent_role": v.agent_role.value,
+                    "opinion": v.opinion.value,
+                    "confidence": v.confidence,
+                    "rationale": v.rationale,
+                }
+                for v in context.votes
+            ],
+        }
+        rag = get_rag_service()
+        content = rag.format_document("agent_summary", summary)
+        rag.index_document(
+            doc_type="agent_summary",
+            content=content,
+            asset_id=context.asset_id,
+            site_id=context.site_id,
+            metadata={"source": "workflow"},
+        )
     
     def _build_context(self, context: WorkflowContext, telemetry: TelemetryInput):
         """Build initial context from telemetry"""
@@ -605,7 +642,31 @@ class CollaborativeDecisionWorkflow:
             "notes": notes,
         })
         
-        # Would feed back to model retraining pipeline
+        # Feed back to model retraining pipeline
+        try:
+            from ..services.retraining_trigger_service import (
+                RetrainingTriggerService,
+                FeedbackRecord,
+            )
+            trigger_svc = RetrainingTriggerService()
+            fb = FeedbackRecord(
+                timestamp=datetime.utcnow(),
+                asset_id=context.asset_id if hasattr(context, "asset_id") else "",
+                fault_type=actual_outcome,
+                predicted_outcome=context.final_decision.value if context.final_decision else "unknown",
+                actual_outcome=actual_outcome,
+                was_correct=was_correct,
+                notes=notes,
+            )
+            retrain_req = trigger_svc.record_feedback(fb)
+            if retrain_req:
+                logger.info(
+                    "Retraining triggered from feedback: %s",
+                    retrain_req.request_id,
+                )
+        except Exception as e:
+            logger.debug(f"Retraining trigger skipped: {e}")
+        
         logger.info(f"Feedback recorded for workflow {workflow_id}: correct={was_correct}")
     
     def get_workflow_summary(self, workflow_id: str) -> Optional[Dict[str, Any]]:

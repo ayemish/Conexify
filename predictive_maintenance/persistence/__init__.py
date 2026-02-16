@@ -17,10 +17,12 @@ from .models import (
     AlertModel,
     FingerprintModel,
     FeedbackModel,
+    RagDocumentModel,
     CalibrationStateModel,
     RegimeSegmentModel,
     ChangeDetectionModel,
     FaultHypothesisModel,
+    WorkOrderModel,
 )
 from .repositories import (
     AssetRepository,
@@ -28,7 +30,9 @@ from .repositories import (
     AlertRepository,
     FingerprintRepository,
     FeedbackRepository,
+    RagRepository,
     CalibrationRepository,
+    WorkOrderRepository,
 )
 
 __all__ = [
@@ -44,15 +48,19 @@ __all__ = [
     "AlertModel",
     "FingerprintModel",
     "FeedbackModel",
+    "RagDocumentModel",
     "CalibrationStateModel",
     "RegimeSegmentModel",
     "ChangeDetectionModel",
     "FaultHypothesisModel",
+    "WorkOrderModel",
     # Repositories
     "AssetRepository",
     "TelemetryRepository",
     "AlertRepository",
     "FingerprintRepository",
     "FeedbackRepository",
+    "RagRepository",
     "CalibrationRepository",
+    "WorkOrderRepository",
 ]

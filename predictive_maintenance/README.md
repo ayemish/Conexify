@@ -301,16 +301,23 @@ config = OrchestratorConfig(
 - Redis (for event bus)
 - CrewAI (optional, for advanced multi-agent features)
 
-## Separation from RMN
+## Monorepo Layout
 
-This project is completely separate from the RMN (Retail Media Network) project:
+This repository uses a multi-package layout to keep domains isolated and prevent
+cross-domain import drift:
 
-| Aspect | PDM Project | RMN Project |
-|--------|-------------|-------------|
-| Location | `/predictive_maintenance/` | `/federated_demand_twin/` |
-| Domain | HVAC/R equipment maintenance | Retail media & demand forecasting |
-| Focus | Fault detection & diagnosis | Campaign optimization & forecasting |
-| Models | Physics-based + ML hybrid | Bayesian demand models |
+| Package | Location | Domain |
+|---------|----------|--------|
+| PDM | `/predictive_maintenance/` | HVAC/R equipment maintenance |
+| Retail Media | `/retail_media/` | RMN optimization & media decisioning |
+| Demand Forecasting | `/demand_forecasting/` | Forecasting & procurement |
+| Oil & Gas | `/oil_gas/` | Telemetry monitoring & PdM in industrial ops |
+| Shared | `/shared/` | Common schemas + agent infra |
+
+**Note on the previous import finding:** the Oil & Gas ecosystem is now a
+top-level package (`/oil_gas/`) rather than a nested `retail_media/vendor/...`
+module. This removes the former `.ecosystems.oil_gas.*` import path and
+eliminates the missing-module initialization error.
 
 ## License
 

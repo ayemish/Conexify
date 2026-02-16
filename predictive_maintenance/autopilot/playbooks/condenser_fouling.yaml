@@ -1,0 +1,102 @@
+id: pb-condenser-fouling-001
+name: Condenser Fouling Remediation
+version: "1.0.0"
+description: |
+  Automated response to condenser fouling detection.
+  Adjusts condenser fan speed to compensate while scheduling maintenance.
+  
+asset_class: HVAC
+fault_type: condenser_fouling
+risk_tier: MEDIUM
+
+triggers:
+  - event_type: alert
+    expr: "fault_type == 'condenser_fouling' and severity in ['medium', 'high']"
+
+preconditions:
+  - expr: "not override_active('condenser_fan_speed')"
+    description: "No existing override on condenser fan"
+  - expr: "outdoor_air_temp > 60"
+    description: "Outdoor temp warm enough to benefit from adjustment"
+
+steps:
+  - id: read_current
+    type: READ
+    description: "Read current condenser operating points"
+    params:
+      point_ids:
+        - condenser_fan_speed
+        - condenser_pressure
+        - outdoor_air_temp
+        - discharge_pressure
+
+  - id: compute_adjustment
+    type: COMPUTE
+    description: "Calculate optimal fan speed increase"
+    params:
+      expression: "min(condenser_fan_speed + 15, 100)"
+      output: target_fan_speed
+
+  - id: adjust_fan_speed
+    type: WRITE_POINT
+    description: "Increase condenser fan speed to compensate for fouling"
+    params:
+      point_id: condenser_fan_speed
+      value: "${target_fan_speed}"
+      ttl_seconds: 14400
+    on_error: ESCALATE
+
+  - id: wait_stabilize
+    type: WAIT
+    description: "Wait for system to stabilize"
+    params:
+      duration_seconds: 300
+
+  - id: create_maintenance_ticket
+    type: CREATE_TICKET
+    description: "Create work order for condenser cleaning"
+    params:
+      title: "Condenser Coil Cleaning Required - ${asset_id}"
+      description: |
+        Autopilot detected condenser fouling and applied temporary compensation.
+        
+        Current fan speed override: ${target_fan_speed}%
+        Condenser pressure: ${condenser_pressure} psi
+        
+        Please schedule condenser coil cleaning within 7 days.
+      priority: P3
+      tags:
+        - condenser
+        - fouling
+        - autopilot
+
+  - id: notify_facilities
+    type: NOTIFY
+    description: "Notify facilities team"
+    params:
+      recipients:
+        - facilities_manager
+      channel: email
+      message: |
+        Condenser fouling detected on ${asset_id} at site ${site_id}.
+        
+        Autopilot has applied a temporary fan speed adjustment.
+        Work order created for coil cleaning.
+
+verification:
+  - expr: "condenser_pressure < condenser_pressure_before * 1.05"
+    window_sec: 600
+    must_hold: true
+    description: "Condenser pressure should stabilize or decrease"
+
+escalation:
+  on_failure: CREATE_TICKET
+  notify:
+    - on_call_engineer
+  message: "Condenser fouling remediation failed - manual intervention required"
+
+evidence:
+  include_telemetry: true
+  before_window_sec: 3600
+  after_window_sec: 1800
+  attach_to_ticket: true

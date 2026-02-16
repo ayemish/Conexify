@@ -100,3 +100,18 @@ def test_calibration_impacts_budget_gate():
     alert_after = service.evaluate(context)
 
     assert alert_after.alert_type == AlertType.ACTIONABLE
+
+
+def test_budget_blocks_when_no_issue_rate_exceeds_cap():
+    service = DecisionPolicyService("asset_1")
+    context = _build_context()
+
+    # Keep regular budget from blocking before no-issue gate is evaluated.
+    service.budget.max_actionable_alarms_per_unit_per_month = 20.0
+    service.monthly_alerts = 10
+    service.monthly_no_issue_found = 2
+    service.budget.max_no_issue_found_rate = 0.10
+
+    budget_ok, reason = service._check_budget(context)
+    assert not budget_ok
+    assert "No-issue-found rate exceeds budget" in reason

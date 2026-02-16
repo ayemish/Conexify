@@ -67,10 +67,20 @@ from .model_agents import (
 from .workflow_agents import (
     PdMAgent, CaseTriageAgent, EvidenceToActionAgent, WorkOrderComposerAgent,
 )
+from ..core.schemas import AlertType
+from ..core.decision_contracts import (
+    AdvisoryAction,
+    AgentAdvisory,
+    FinalDisposition,
+    GuardianDecision,
+    KernelDecisionArtifact,
+)
 from ..integration.event_bus import (
     RedisEventBus, PdMEvent, PdMEventType, PdMEventFactory,
     EventHandler, InMemoryEventBus
 )
+from ..integration.advanced_system import HVACRPdMAdvancedSystem, create_pdm_system
+from ..services.guardian_merge_service import GuardianMergeService
 
 logger = logging.getLogger(__name__)
 
@@ -172,22 +182,26 @@ class OrchestratorResult:
     should_alert: bool
     alert_type: Optional[str]  # "watch", "action", "dispatch"
     decision: Optional[CollaborativeDecision]
+    guardian_decision: Optional[GuardianDecision] = None
+    kernel_artifact_id: Optional[str] = None
+    kernel_alert_type: Optional[str] = None
     
     # Aggregated information
-    regime: str
-    sensor_trust: float
-    change_detected: bool
-    fault_hypothesis: Optional[str]
-    fault_probability: float
+    regime: str = ""
+    sensor_trust: float = 1.0
+    change_detected: bool = False
+    fault_hypothesis: Optional[str] = None
+    fault_probability: float = 0.0
+    n_advisories: int = 0
     
     # Recommendations
-    recommendations: List[str]
-    concerns: List[str]
-    evidence: List[Dict[str, Any]]
+    recommendations: List[str] = field(default_factory=list)
+    concerns: List[str] = field(default_factory=list)
+    evidence: List[Dict[str, Any]] = field(default_factory=list)
     
     # Metrics
-    processing_time_ms: float
-    agents_consulted: int
+    processing_time_ms: float = 0.0
+    agents_consulted: int = 0
     
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -196,6 +210,18 @@ class OrchestratorResult:
             "asset_id": self.asset_id,
             "should_alert": self.should_alert,
             "alert_type": self.alert_type,
+            "guardian_decision": {
+                "disposition": self.guardian_decision.disposition.value,
+                "final_alert_type": self.guardian_decision.final_alert_type.value,
+                "confidence": self.guardian_decision.confidence,
+                "false_alarm_probability": self.guardian_decision.false_alarm_probability,
+                "recommended_action": self.guardian_decision.recommended_action,
+                "reasons": self.guardian_decision.reasons,
+                "advisories_used": self.guardian_decision.advisories_used,
+            } if self.guardian_decision else None,
+            "kernel_artifact_id": self.kernel_artifact_id,
+            "kernel_alert_type": self.kernel_alert_type,
+            "n_advisories": self.n_advisories,
             "regime": self.regime,
             "sensor_trust": self.sensor_trust,
             "change_detected": self.change_detected,
@@ -235,6 +261,8 @@ class PDMModelOrchestrator:
         self.config = config or OrchestratorConfig()
         self.event_bus = event_bus or InMemoryEventBus(f"orchestrator_{site_id}")
         self.message_bus = message_bus or AgentMessageBus()
+        self.guardian_merge = GuardianMergeService()
+        self._kernel_systems: Dict[str, HVACRPdMAdvancedSystem] = {}
         
         # Initialize all model agents
         self._init_agents()
@@ -250,6 +278,15 @@ class PDMModelOrchestrator:
         self.last_reset_week = datetime.utcnow().isocalendar()[1]
         
         logger.info(f"PDMModelOrchestrator initialized for site {site_id}")
+
+    def _get_kernel_system(self, asset_id: str) -> HVACRPdMAdvancedSystem:
+        """Get or create deterministic kernel system for an asset."""
+        if asset_id not in self._kernel_systems:
+            self._kernel_systems[asset_id] = create_pdm_system(
+                asset_id=asset_id,
+                site_id=self.site_id,
+            )
+        return self._kernel_systems[asset_id]
     
     def _init_agents(self):
         """Initialize all model agents in layers"""
@@ -355,6 +392,10 @@ class PDMModelOrchestrator:
         
         inputs = telemetry.to_dict()
         layer_results: Dict[str, List[AgentAnalysisResult]] = {}
+
+        # Run deterministic kernel first; this remains the source of truth.
+        kernel_system = self._get_kernel_system(telemetry.asset_id)
+        kernel_alert, kernel_artifact = kernel_system.process_telemetry_with_artifact(inputs.copy())
         
         # =====================================================================
         # Layer 0: Regime Detection
@@ -442,6 +483,17 @@ class PDMModelOrchestrator:
         should_alert, alert_type = self._apply_operational_constraints(
             should_alert, alert_type
         )
+
+        # Build advisory actions from collaborative signals and merge with kernel.
+        advisories = self._build_advisories(
+            alert_decision=alert_decision,
+            should_alert=should_alert,
+            alert_type=alert_type,
+        )
+        guardian_decision = self.guardian_merge.merge(kernel_artifact, advisories)
+        should_alert, alert_type = self._map_guardian_to_orchestrator_alert(
+            guardian_decision, should_alert, alert_type
+        )
         
         # =====================================================================
         # Build Result
@@ -471,6 +523,10 @@ class PDMModelOrchestrator:
             should_alert=should_alert,
             alert_type=alert_type,
             decision=alert_decision,
+            guardian_decision=guardian_decision,
+            kernel_artifact_id=kernel_artifact.artifact_id,
+            kernel_alert_type=kernel_alert.alert_type.value,
+            n_advisories=len(advisories),
             regime=regime_result.result_data.get("regime", "unknown"),
             sensor_trust=trust_result.result_data.get("min_trust", 1.0),
             change_detected=len(change_result.result_data.get("changes_detected", [])) > 0,
@@ -494,6 +550,119 @@ class PDMModelOrchestrator:
             self.result_history = self.result_history[-self.max_history // 2:]
         
         return result
+
+    def _build_advisories(
+        self,
+        alert_decision: Optional[CollaborativeDecision],
+        should_alert: bool,
+        alert_type: Optional[str],
+    ) -> List[AgentAdvisory]:
+        """Convert collaborative vote dynamics into advisory actions."""
+        advisories: List[AgentAdvisory] = []
+        seen = set()
+        if not alert_decision:
+            return advisories
+
+        if alert_decision.final_decision != "proceed":
+            key = ("decision_policy", AdvisoryAction.DOWNGRADE_TO_WATCH.value)
+            seen.add(key)
+            advisories.append(
+                AgentAdvisory(
+                    agent_id="decision_policy",
+                    agent_role=PDMModelAgentRole.DECISION_POLICY.value,
+                    action=AdvisoryAction.DOWNGRADE_TO_WATCH,
+                    confidence=max(alert_decision.aggregate_confidence, 0.6),
+                    rationale=f"Collaborative decision={alert_decision.final_decision}; downgrade to watch",
+                )
+            )
+
+        if not alert_decision.consensus_reached:
+            key = ("decision_policy", AdvisoryAction.ESCALATE_TO_HUMAN.value)
+            if key not in seen:
+                seen.add(key)
+                advisories.append(
+                    AgentAdvisory(
+                        agent_id="decision_policy",
+                        agent_role=PDMModelAgentRole.DECISION_POLICY.value,
+                        action=AdvisoryAction.ESCALATE_TO_HUMAN,
+                        confidence=max(alert_decision.aggregate_confidence, 0.75),
+                        rationale="Consensus not reached; require human review",
+                    )
+                )
+
+        for vote in alert_decision.votes:
+            if vote.agent_role == PDMModelAgentRole.SENSOR_TRUST and vote.opinion in [
+                AgentOpinion.DISAGREE,
+                AgentOpinion.STRONGLY_DISAGREE,
+            ]:
+                key = (vote.agent_id, AdvisoryAction.SUPPRESS_FOR_DATA_QUALITY.value)
+                if key in seen:
+                    continue
+                seen.add(key)
+                advisories.append(
+                    AgentAdvisory(
+                        agent_id=vote.agent_id,
+                        agent_role=vote.agent_role.value,
+                        action=AdvisoryAction.SUPPRESS_FOR_DATA_QUALITY,
+                        confidence=vote.confidence,
+                        rationale=vote.rationale,
+                        evidence=list(vote.evidence),
+                    )
+                )
+                continue
+
+            if vote.opinion == AgentOpinion.STRONGLY_DISAGREE and vote.confidence >= 0.8:
+                key = (vote.agent_id, AdvisoryAction.ESCALATE_TO_HUMAN.value)
+                if key in seen:
+                    continue
+                seen.add(key)
+                advisories.append(
+                    AgentAdvisory(
+                        agent_id=vote.agent_id,
+                        agent_role=vote.agent_role.value,
+                        action=AdvisoryAction.ESCALATE_TO_HUMAN,
+                        confidence=vote.confidence,
+                        rationale=vote.rationale,
+                        evidence=list(vote.evidence),
+                    )
+                )
+
+        if should_alert and alert_type == "dispatch":
+            key = ("dispatch_guard", AdvisoryAction.ESCALATE_TO_HUMAN.value)
+            if key not in seen:
+                advisories.append(
+                    AgentAdvisory(
+                        agent_id="dispatch_guard",
+                        agent_role="guardian",
+                        action=AdvisoryAction.ESCALATE_TO_HUMAN,
+                        confidence=0.8,
+                        rationale="Dispatch recommendation requires human review",
+                    )
+                )
+
+        return advisories
+
+    def _map_guardian_to_orchestrator_alert(
+        self,
+        guardian_decision: GuardianDecision,
+        prior_should_alert: bool,
+        prior_alert_type: Optional[str],
+    ) -> Tuple[bool, Optional[str]]:
+        """Map guardian output into orchestrator-facing alert semantics."""
+        if guardian_decision.final_alert_type == AlertType.ACTIONABLE:
+            if guardian_decision.disposition == FinalDisposition.HUMAN_REVIEW_REQUIRED:
+                return True, "human_review"
+            if prior_alert_type == "dispatch":
+                return True, "dispatch"
+            return True, "action"
+
+        if guardian_decision.final_alert_type == AlertType.SENSOR_INTEGRITY:
+            return True, "sensor_integrity"
+
+        # WATCH remains visible status unless explicitly suppressed upstream.
+        if prior_should_alert or guardian_decision.disposition != FinalDisposition.AUTO_MONITOR:
+            return True, "watch"
+        return False, None
     
     def _determine_alert_type(
         self,

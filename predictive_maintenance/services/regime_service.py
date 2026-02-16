@@ -323,6 +323,25 @@ class RegimeSegmentationService:
         # If many recent samples were OFF, we're in startup
         if off_count >= len(recent) * 0.5:
             return True
+
+        # Exit startup early if we have enough stable ON samples
+        recent_on = list(self.history)[-self.config.startup_min_samples:]
+        if len(recent_on) >= self.config.startup_min_samples and all(s.compressor_on for s in recent_on):
+            stable_temp = False
+            stable_pressure = False
+
+            recent_temps = [s.supply_air_temp for s in recent_on if s.supply_air_temp is not None]
+            if len(recent_temps) >= 3:
+                temp_change = abs(recent_temps[-1] - recent_temps[0])
+                stable_temp = temp_change <= self.config.transient_temp_change_threshold
+
+            recent_pressures = [s.suction_pressure for s in recent_on if s.suction_pressure is not None]
+            if len(recent_pressures) >= 3:
+                pressure_std = np.std(recent_pressures)
+                stable_pressure = pressure_std <= self.config.startup_pressure_variance_threshold
+
+            if stable_temp or stable_pressure:
+                return False
         
         # Check for startup duration
         if self.current_regime == OperatingRegime.STARTUP:
@@ -519,6 +538,7 @@ class RegimeConfig:
     # Startup
     startup_duration_seconds: float = 300.0  # 5 minutes
     startup_pressure_variance_threshold: float = 5.0  # psi
+    startup_min_samples: int = 8
     
     # Shutdown
     shutdown_pressure_decay_threshold: float = 10.0  # psi

@@ -126,12 +126,15 @@ class SequentialChangeDetectionService:
     def process_observation(self, 
                             obs: ResidualObservation,
                             current_regime: OperatingRegime,
-                            sensor_trust: float = 1.0) -> ChangePointDetection:
+                            sensor_trust: float = 1.0,
+                            trust_score: Optional[float] = None) -> ChangePointDetection:
         """
         Process a residual observation through change detection.
         
         Returns updated change detection state.
         """
+        if trust_score is not None:
+            sensor_trust = trust_score
         sensor_id = obs.sensor_id
         
         # Initialize states if needed

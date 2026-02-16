@@ -442,11 +442,19 @@ class BehaviorModelService:
         return model.get("mean", 0), model.get("std", 1)
     
     def update_with_observation(self,
-                                 observed: float,
-                                 sensor_type: SensorType,
-                                 regime: OperatingRegime,
-                                 context: Dict[str, float]):
+                                 observed: Optional[float] = None,
+                                 sensor_type: Optional[SensorType] = None,
+                                 regime: Optional[OperatingRegime] = None,
+                                 context: Optional[Dict[str, float]] = None,
+                                 *,
+                                 observed_value: Optional[float] = None):
         """Add observation to training data for model updates"""
+        if observed is None:
+            observed = observed_value
+        if observed is None or sensor_type is None or regime is None:
+            raise ValueError("observed, sensor_type, and regime are required")
+        if context is None:
+            context = {}
         key = (regime, sensor_type)
         
         if key not in self.training_data:

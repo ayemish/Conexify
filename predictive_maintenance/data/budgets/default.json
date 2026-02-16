@@ -1,0 +1,9 @@
+{
+  "site_id": "default",
+  "overall_capex": 500000.0,
+  "overall_opex": 200000.0,
+  "by_location": [],
+  "by_asset_type": [],
+  "notes": "Test budget",
+  "updated_at": "2026-02-13 00:04:41.746292+00:00"
+}

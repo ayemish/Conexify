@@ -1,0 +1,7 @@
+Alembic scaffold for PDM
+
+Usage:
+  alembic revision -m "message" --autogenerate
+  alembic upgrade head
+
+Configure the DB URL with PDM_DB_URL or PDM_DB_* env vars.

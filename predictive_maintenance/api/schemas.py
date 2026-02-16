@@ -79,9 +79,9 @@ class TelemetryRequest(BaseModel):
     # Extra data
     extra_data: Optional[Dict[str, Any]] = None
     
-    class Config:
-        schema_extra = {
-            "example": {
+    model_config = {
+        "json_schema_extra": {
+            "examples": [{
                 "timestamp": "2024-01-15T14:30:00Z",
                 "asset_id": "RTU_001",
                 "site_id": "site_001",
@@ -92,8 +92,9 @@ class TelemetryRequest(BaseModel):
                 "supply_air_temp": 55.0,
                 "return_air_temp": 75.0,
                 "ambient_temp": 95.0,
-            }
+            }]
         }
+    }
 
 
 class TelemetryBatchRequest(BaseModel):
@@ -143,9 +144,9 @@ class AlertResponse(BaseModel):
     acknowledged_at: Optional[datetime] = None
     resolved_at: Optional[datetime] = None
     
-    class Config:
-        schema_extra = {
-            "example": {
+    model_config = {
+        "json_schema_extra": {
+            "examples": [{
                 "alert_id": "ALT_12345678",
                 "asset_id": "RTU_001",
                 "alert_type": "actionable",
@@ -161,8 +162,9 @@ class AlertResponse(BaseModel):
                 "action_urgency": "schedule",
                 "created_at": "2024-01-15T14:30:00Z",
                 "status": "active"
-            }
+            }]
         }
+    }
 
 
 class AlertListResponse(BaseModel):
@@ -175,8 +177,14 @@ class AlertListResponse(BaseModel):
 
 class AlertAcknowledgeRequest(BaseModel):
     """Acknowledge alert request"""
-    acknowledged_by: str = Field(..., min_length=1, max_length=100)
+    acknowledged_by: str = Field(default="operator_ui", min_length=1, max_length=100)
     notes: Optional[str] = None
+
+
+class AlertDismissRequest(BaseModel):
+    """Dismiss/suppress alert request"""
+    dismissed_by: str = Field(default="operator_ui", min_length=1, max_length=100)
+    notes: str = ""
 
 
 class AlertResolveRequest(BaseModel):
@@ -192,21 +200,31 @@ class AlertResolveRequest(BaseModel):
 class FeedbackRequest(BaseModel):
     """Feedback submission request"""
     alert_id: str = Field(..., min_length=1)
-    outcome: str = Field(..., regex="^(confirmed_fault|no_issue_found|sensor_problem|pending)$")
+    outcome: str = Field(..., pattern="^(confirmed_fault|no_issue_found|sensor_problem|pending)$")
     confirmed_fault_type: Optional[str] = None
     notes: str = ""
     feedback_by: Optional[str] = None
     
-    class Config:
-        schema_extra = {
-            "example": {
+    model_config = {
+        "json_schema_extra": {
+            "examples": [{
                 "alert_id": "ALT_12345678",
                 "outcome": "confirmed_fault",
                 "confirmed_fault_type": "refrigerant_leak",
                 "notes": "Found 2lb low on R-410A, recharged",
                 "feedback_by": "tech_john"
-            }
+            }]
         }
+    }
+
+
+class AlertFeedbackQuickRequest(BaseModel):
+    """Backward-compatible alert feedback payload for /alerts/{id}/feedback"""
+    helpful: Optional[bool] = None
+    outcome: Optional[str] = Field(None, pattern="^(confirmed_fault|no_issue_found|sensor_problem|pending)$")
+    confirmed_fault_type: Optional[str] = None
+    notes: str = ""
+    feedback_by: Optional[str] = None
 
 
 class FeedbackResponse(BaseModel):
@@ -324,6 +342,81 @@ class CalibrationMetricsResponse(BaseModel):
     feedback_by_outcome: Dict[str, int]
     calibration_curve: Dict[str, float]
     last_calibration: Optional[datetime] = None
+
+
+# =============================================================================
+# RAG / Query
+# =============================================================================
+
+class QueryRequest(BaseModel):
+    """Conversational query request"""
+    query: str = Field(..., min_length=1)
+    asset_id: Optional[str] = None
+    site_id: Optional[str] = None
+    top_k: int = Field(default=5, ge=1, le=20)
+
+
+class QuerySource(BaseModel):
+    """Source document returned by RAG search"""
+    doc_id: str
+    doc_type: str
+    score: float
+    snippet: str
+    asset_id: Optional[str] = None
+    site_id: Optional[str] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class QueryResponse(BaseModel):
+    """Query response"""
+    query: str
+    answer: str
+    sources: List[QuerySource] = Field(default_factory=list)
+    transcription: Optional[str] = None
+
+
+# =============================================================================
+# Scenario Chat
+# =============================================================================
+
+class ScenarioChatRequest(BaseModel):
+    persona_id: str
+    persona_prompt: str
+    message: str
+    scope: str = Field(default="company")
+    marketing_budget: str
+    risk_level: str
+    payback_timeline: str
+
+
+class ScenarioAgentInstruction(BaseModel):
+    agent_id: str
+    title: str
+    instruction: str
+
+
+class ScenarioAgentOutput(BaseModel):
+    agent_id: str
+    title: str
+    summary: str
+
+
+class ScenarioChatResponse(BaseModel):
+    persona_id: str
+    instructions: List[ScenarioAgentInstruction]
+    outputs: List[ScenarioAgentOutput]
+    created_at: datetime
+
+
+class PersonaResponse(BaseModel):
+    id: str
+    name: str
+    tagline: str
+    prompt: str
+
+
+class PersonaListResponse(BaseModel):
+    personas: List[PersonaResponse]
 
 
 # Update forward references

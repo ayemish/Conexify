@@ -16,12 +16,14 @@ from .models import (
     AlertModel,
     FingerprintModel,
     FeedbackModel,
+    RagDocumentModel,
     CalibrationStateModel,
     RegimeSegmentModel,
     ChangeDetectionModel,
     FaultHypothesisModel,
     ModelVersionModel,
     AuditLogModel,
+    WorkOrderModel,
 )
 
 logger = logging.getLogger(__name__)
@@ -100,10 +102,35 @@ class TelemetryRepository(BaseRepository):
         self.session.add(telemetry)
         return telemetry
     
-    def bulk_create(self, records: List[Dict[str, Any]]) -> int:
-        """Bulk insert telemetry records"""
+    def bulk_create(self, records: List[Dict[str, Any]], actor: str = "system") -> int:
+        """Bulk insert telemetry records.
+
+        Uses bulk_insert_mappings for performance. An audit log entry is
+        written separately to maintain traceability for bulk imports.
+        """
+        count = len(records)
         self.session.bulk_insert_mappings(TelemetryModel, records)
-        return len(records)
+
+        # Write audit trail for bulk import
+        try:
+            asset_ids = list({r.get("asset_id", "") for r in records if r.get("asset_id")})
+            audit = AuditLogModel(
+                event_id=f"bulk-{__import__('uuid').uuid4().hex[:12]}",
+                action="telemetry_bulk_import",
+                actor=actor,
+                target_type="telemetry",
+                target_id=asset_ids[0] if len(asset_ids) == 1 else None,
+                details={
+                    "record_count": count,
+                    "asset_ids": asset_ids[:50],
+                    "asset_count": len(asset_ids),
+                },
+            )
+            self.session.add(audit)
+        except Exception as e:
+            logger.debug("Bulk import audit log failed: %s", e)
+
+        return count
     
     def get_range(
         self,
@@ -213,6 +240,17 @@ class AlertRepository(BaseRepository):
             "resolved_at": datetime.utcnow(),
             "resolved_by": resolved_by,
             "resolution_notes": notes
+        })
+
+    def dismiss(self, alert_id: str, dismissed_by: str, notes: str = ""):
+        """Suppress/dismiss an alert without marking as resolved fault."""
+        self.session.query(AlertModel).filter(
+            AlertModel.alert_id == alert_id
+        ).update({
+            "status": "suppressed",
+            "resolved_at": datetime.utcnow(),
+            "resolved_by": dismissed_by,
+            "resolution_notes": notes or "dismissed",
         })
     
     def add_feedback(self, alert_id: str, outcome: str, notes: str = ""):
@@ -438,6 +476,52 @@ class CalibrationRepository(BaseRepository):
         return state
 
 
+class RagRepository(BaseRepository):
+    """Repository for RAG documents and embeddings"""
+    
+    def upsert(
+        self,
+        doc_id: str,
+        doc_type: str,
+        content: str,
+        embedding,
+        embedding_dim: int,
+        asset_id: Optional[str] = None,
+        site_id: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> RagDocumentModel:
+        existing = self.session.query(RagDocumentModel).filter(
+            RagDocumentModel.doc_id == doc_id
+        ).first()
+        if existing:
+            existing.doc_type = doc_type
+            existing.content = content
+            existing.embedding = embedding
+            existing.embedding_dim = embedding_dim
+            existing.asset_id = asset_id
+            existing.site_id = site_id
+            existing.doc_metadata = metadata or {}
+            existing.updated_at = datetime.utcnow()
+            return existing
+        doc = RagDocumentModel(
+            doc_id=doc_id,
+            doc_type=doc_type,
+            content=content,
+            embedding=embedding,
+            embedding_dim=embedding_dim,
+            asset_id=asset_id,
+            site_id=site_id,
+            doc_metadata=metadata or {},
+        )
+        self.session.add(doc)
+        return doc
+    
+    def list_recent(self, limit: int = 200) -> List[RagDocumentModel]:
+        return self.session.query(RagDocumentModel).order_by(
+            RagDocumentModel.created_at.desc()
+        ).limit(limit).all()
+
+
 class RegimeSegmentRepository(BaseRepository):
     """Repository for regime segment operations"""
     
@@ -498,6 +582,73 @@ class ChangeDetectionRepository(BaseRepository):
             ChangeDetectionModel.asset_id == asset_id,
             ChangeDetectionModel.change_detected == True
         ).all()
+
+
+class WorkOrderRepository(BaseRepository):
+    """Repository for work order operations"""
+
+    def create(self, wo_id: str, asset_id: str, site_id: str, **kwargs) -> WorkOrderModel:
+        """Create a new work order record."""
+        wo = WorkOrderModel(
+            wo_id=wo_id,
+            asset_id=asset_id,
+            site_id=site_id,
+            **kwargs,
+        )
+        self.session.add(wo)
+        self.session.flush()
+        return wo
+
+    def get_by_wo_id(self, wo_id: str) -> Optional[WorkOrderModel]:
+        return self.session.query(WorkOrderModel).filter(
+            WorkOrderModel.wo_id == wo_id
+        ).first()
+
+    def get_by_asset(self, asset_id: str, limit: int = 100) -> List[WorkOrderModel]:
+        return self.session.query(WorkOrderModel).filter(
+            WorkOrderModel.asset_id == asset_id
+        ).order_by(WorkOrderModel.opened_at.desc()).limit(limit).all()
+
+    def get_by_site(self, site_id: str, limit: int = 500) -> List[WorkOrderModel]:
+        return self.session.query(WorkOrderModel).filter(
+            WorkOrderModel.site_id == site_id
+        ).order_by(WorkOrderModel.opened_at.desc()).limit(limit).all()
+
+    def get_open(self, site_id: Optional[str] = None) -> List[WorkOrderModel]:
+        """Get all open/in-progress work orders."""
+        query = self.session.query(WorkOrderModel).filter(
+            WorkOrderModel.status.in_(["open", "in_progress", "assigned"])
+        )
+        if site_id:
+            query = query.filter(WorkOrderModel.site_id == site_id)
+        return query.order_by(WorkOrderModel.opened_at.desc()).all()
+
+    def get_in_range(
+        self,
+        start: "datetime",
+        end: "datetime",
+        site_id: Optional[str] = None,
+    ) -> List[WorkOrderModel]:
+        """Get work orders opened within a date range."""
+        query = self.session.query(WorkOrderModel).filter(
+            WorkOrderModel.opened_at >= start,
+            WorkOrderModel.opened_at <= end,
+        )
+        if site_id:
+            query = query.filter(WorkOrderModel.site_id == site_id)
+        return query.order_by(WorkOrderModel.opened_at.desc()).all()
+
+    def close(self, wo_id: str, resolution: str = "", cost: float = 0.0, labor_hours: float = 0.0) -> Optional[WorkOrderModel]:
+        """Close a work order."""
+        wo = self.get_by_wo_id(wo_id)
+        if wo:
+            wo.status = "completed"
+            wo.resolution = resolution
+            wo.cost = cost
+            wo.labor_hours = labor_hours
+            wo.closed_at = datetime.utcnow()
+            self.session.flush()
+        return wo
 
 
 class AuditRepository(BaseRepository):

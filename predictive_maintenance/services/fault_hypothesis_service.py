@@ -70,6 +70,11 @@ DEFAULT_FAULT_PRIORS: Dict[FaultType, FaultPrior] = {
         age_factor=0.02,
         runtime_factor=0.005,
     ),
+    FaultType.REFRIGERANT_OVERCHARGE: FaultPrior(
+        fault_type=FaultType.REFRIGERANT_OVERCHARGE,
+        base_rate=0.03,  # Less common than leaks but non-trivial
+        age_factor=0.01,
+    ),
     FaultType.CONDENSER_FOULING: FaultPrior(
         fault_type=FaultType.CONDENSER_FOULING,
         base_rate=0.25,
@@ -258,6 +263,13 @@ class FaultHypothesisService:
             
             raw_priors[fault_type] = rate
             total += rate
+
+        # Ensure all fault types have a prior (robust to enum additions)
+        missing_base_rate = 0.01
+        for fault_type in FaultType:
+            if fault_type not in raw_priors:
+                raw_priors[fault_type] = missing_base_rate
+                total += missing_base_rate
         
         # Normalize to probabilities
         if total > 0:
@@ -454,7 +466,10 @@ class FaultHypothesisService:
         where P(symptoms | fault) = Π_i LR_i ^ strength_i
         """
         # Start with priors (log scale for numerical stability)
-        log_posteriors = {ft: np.log(p + 1e-10) for ft, p in self.priors.items()}
+        log_posteriors = {
+            ft: np.log(self.priors.get(ft, 1e-12) + 1e-12)
+            for ft in FaultType
+        }
         
         # Accumulate evidence from each symptom
         evidence_list = []

@@ -1,0 +1,120 @@
+id: pb-high-discharge-temp-001
+name: High Discharge Temperature Response
+version: "1.0.0"
+description: |
+  Responds to high compressor discharge temperature by adjusting
+  operating parameters to protect equipment.
+
+asset_class: HVAC
+fault_type: high_discharge_temp
+risk_tier: MEDIUM
+
+triggers:
+  - event_type: telemetry
+    expr: "discharge_temp > 220"
+  - event_type: alert
+    expr: "fault_type == 'high_discharge_temp'"
+
+preconditions:
+  - expr: "compressor_status == 'running'"
+    description: "Compressor must be running"
+  - expr: "discharge_temp > 200"
+    description: "Discharge temp above warning threshold"
+
+steps:
+  - id: read_state
+    type: READ
+    description: "Capture current system state"
+    params:
+      point_ids:
+        - discharge_temp
+        - discharge_pressure
+        - suction_pressure
+        - condenser_fan_speed
+        - outdoor_air_temp
+        - superheat
+        - cooling_stage
+
+  - id: increase_condenser_airflow
+    type: WRITE_POINT
+    description: "Maximize condenser fan speed"
+    params:
+      point_id: condenser_fan_speed
+      value: 100
+      ttl_seconds: 3600
+    on_error: SKIP
+
+  - id: wait_response
+    type: WAIT
+    description: "Wait for temperature response"
+    params:
+      duration_seconds: 180
+
+  - id: read_after_adjustment
+    type: READ
+    description: "Check temperature after fan adjustment"
+    params:
+      point_ids:
+        - discharge_temp
+        - discharge_pressure
+
+  - id: check_improvement
+    type: COMPUTE
+    description: "Check if temperature improved"
+    params:
+      expression: "discharge_temp < 210"
+      output: temp_improved
+
+  - id: reduce_capacity_if_needed
+    type: WRITE_POINT
+    description: "Reduce cooling capacity if still high"
+    condition: "not temp_improved"
+    params:
+      point_id: cooling_capacity_limit
+      value: 75
+      ttl_seconds: 3600
+    on_error: ESCALATE
+
+  - id: create_ticket
+    type: CREATE_TICKET
+    description: "Create maintenance ticket"
+    params:
+      title: "High Discharge Temperature - ${asset_id}"
+      description: |
+        High compressor discharge temperature detected.
+        
+        Peak Temperature: ${discharge_temp}°F
+        Outdoor Air: ${outdoor_air_temp}°F
+        
+        Autopilot Actions:
+        - Condenser fan set to 100%
+        - Capacity limited to 75% (if needed)
+        
+        Possible causes:
+        - Condenser fouling
+        - Low refrigerant charge
+        - Non-condensables in system
+        - Liquid line restriction
+      priority: P2
+      tags:
+        - compressor
+        - high_temp
+        - autopilot
+
+verification:
+  - expr: "discharge_temp < 215"
+    window_sec: 600
+    must_hold: true
+    description: "Discharge temp should decrease below 215°F"
+
+escalation:
+  on_failure: CREATE_TICKET
+  notify:
+    - hvac_technician
+  message: "High discharge temp not resolved - compressor protection needed"
+
+evidence:
+  include_telemetry: true
+  before_window_sec: 1800
+  after_window_sec: 1200
+  attach_to_ticket: true

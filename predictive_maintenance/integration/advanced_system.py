@@ -244,6 +244,8 @@ class HVACRPdMAdvancedSystem:
         # Reset per-tick observation containers
         self.current_residuals = {}
         self.current_residuals_by_id = {}
+        self.current_trust_scores = {}
+        self.current_changes = {}
         
         # 1. Build telemetry snapshot for regime detection
         snapshot = self._build_snapshot(telemetry, timestamp)
@@ -584,7 +586,11 @@ class HVACRPdMAdvancedSystem:
             discharge_temp=telemetry.get("discharge_temp"),
             supply_air_temp=telemetry.get("supply_air_temp"),
             return_air_temp=telemetry.get("return_air_temp"),
-            ambient_temp=self.last_context.get("ambient_temp") if self.last_context else telemetry.get("ambient_temp"),
+            ambient_temp=(
+                telemetry.get("ambient_temp")
+                if telemetry.get("ambient_temp") is not None
+                else (self.last_context.get("ambient_temp") if self.last_context else None)
+            ),
             zone_temp=telemetry.get("zone_temp"),
             setpoint=telemetry.get("setpoint"),
             suction_pressure=telemetry.get("suction_pressure"),
@@ -709,11 +715,17 @@ class HVACRPdMAdvancedSystem:
     def _build_decision_context(self, telemetry: Dict[str, Any],
                                  timestamp: datetime) -> DecisionContext:
         """Build decision context for policy evaluation"""
-        # Get untrusted sensors
-        untrusted = self.sensor_trust_service.get_untrusted_sensors(0.8)
-        
-        # Get min trust
-        trust_scores = self.sensor_trust_service.get_all_trust_scores()
+        # Prefer current tick trust scores to avoid stale decisions.
+        trust_scores = (
+            self.current_trust_scores.copy()
+            if self.current_trust_scores
+            else self.sensor_trust_service.get_all_trust_scores()
+        )
+        untrusted = [
+            sensor_id
+            for sensor_id, trust in trust_scores.items()
+            if trust.trust_score < 0.8
+        ]
         min_trust = min([t.trust_score for t in trust_scores.values()], default=1.0)
         
         # Check for changes

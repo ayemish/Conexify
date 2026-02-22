@@ -273,7 +273,7 @@ class RegimeDetectionAgent(PDMModelAgent):
             behaves fundamentally differently during startup, steady-state, defrost, and shutdown. 
             You recognize that comparing a startup transient to steady-state operation leads to 
             false alarms, and you classify regimes to prevent this confusion.""",
-            retailer_id=site_id,
+            site_id=site_id,
         )
         super().__init__(config, PDMModelAgentRole.REGIME_DETECTOR, event_bus, **kwargs)
         
@@ -283,7 +283,15 @@ class RegimeDetectionAgent(PDMModelAgent):
         
         # Import the actual service
         from ..services.regime_service import RegimeSegmentationService
-        self.regime_service = RegimeSegmentationService(site_id)
+        self._regime_services: Dict[str, RegimeSegmentationService] = {}
+        self._regime_service_cls = RegimeSegmentationService
+
+    def _get_regime_service(self, asset_id: str):
+        service = self._regime_services.get(asset_id)
+        if service is None:
+            service = self._regime_service_cls(asset_id)
+            self._regime_services[asset_id] = service
+        return service
     
     @property
     def handled_event_types(self) -> List[PdMEventType]:
@@ -293,10 +301,13 @@ class RegimeDetectionAgent(PDMModelAgent):
         """Classify current operating regime"""
         from ..services.regime_service import TelemetrySnapshot
         
+        asset_id = inputs.get("asset_id", self.site_id)
+        regime_service = self._get_regime_service(asset_id)
+
         # Build snapshot from inputs
         snapshot = TelemetrySnapshot(
             timestamp=inputs.get("timestamp", datetime.utcnow()),
-            asset_id=inputs.get("asset_id", self.site_id),
+            asset_id=asset_id,
             compressor_on=inputs.get("compressor_on", False),
             compressor_current=inputs.get("compressor_current"),
             compressor_power=inputs.get("compressor_power"),
@@ -313,7 +324,7 @@ class RegimeDetectionAgent(PDMModelAgent):
         )
         
         # Classify regime
-        regime_state = self.regime_service.classify_regime(snapshot)
+        regime_state = regime_service.classify_regime(snapshot)
         self.current_regime = regime_state.regime.value
         
         result = AgentAnalysisResult(
@@ -325,7 +336,7 @@ class RegimeDetectionAgent(PDMModelAgent):
                 "regime": regime_state.regime.value,
                 "confidence": regime_state.confidence,
                 "duration_seconds": regime_state.duration_seconds,
-                "is_steady_state": self.regime_service.is_steady_state(),
+                "is_steady_state": regime_service.is_steady_state(),
                 "previous_regime": regime_state.previous_regime.value if regime_state.previous_regime else None,
             },
             confidence=regime_state.confidence,
@@ -335,7 +346,7 @@ class RegimeDetectionAgent(PDMModelAgent):
             ],
             concerns=[
                 "System in transient regime - defer behavioral analysis"
-            ] if not self.regime_service.is_steady_state() else [],
+            ] if not regime_service.is_steady_state() else [],
         )
         
         self.broadcast_result(result)
@@ -343,8 +354,10 @@ class RegimeDetectionAgent(PDMModelAgent):
     
     def vote_on_decision(self, question: str, context: Dict[str, Any]) -> AgentVote:
         """Vote on whether to proceed with analysis given current regime"""
-        is_steady = self.regime_service.is_steady_state()
-        regime_state = self.regime_service.get_current_state()
+        latest = self.get_latest_result()
+        is_steady = bool(latest.result_data.get("is_steady_state", False)) if latest else False
+        regime = latest.result_data.get("regime", "unknown") if latest else "unknown"
+        regime_confidence = float(latest.result_data.get("confidence", 0.5)) if latest else 0.5
         
         if "should_alert" in question.lower():
             if not is_steady:
@@ -353,7 +366,7 @@ class RegimeDetectionAgent(PDMModelAgent):
                     agent_role=self.model_role,
                     opinion=AgentOpinion.DISAGREE,
                     confidence=0.9,
-                    rationale=f"System is in {self.current_regime} regime (transient). Defer alerting until steady-state.",
+                    rationale=f"System is in {regime} regime (transient). Defer alerting until steady-state.",
                     weight=1.5,  # High weight for regime considerations
                 )
             else:
@@ -361,8 +374,8 @@ class RegimeDetectionAgent(PDMModelAgent):
                     agent_id=self.config.agent_id,
                     agent_role=self.model_role,
                     opinion=AgentOpinion.NEUTRAL,
-                    confidence=regime_state.confidence if regime_state else 0.5,
-                    rationale=f"System is in {self.current_regime} (steady-state). Regime analysis supports proceeding.",
+                    confidence=regime_confidence,
+                    rationale=f"System is in {regime} (steady-state). Regime analysis supports proceeding.",
                     weight=1.0,
                 )
         
@@ -399,7 +412,7 @@ class SensorTrustAgent(PDMModelAgent):
             caused by drifting sensors, stuck readings, and communication glitches. You know that 
             the first question to ask is not 'What's wrong with the equipment?' but 'Can I trust 
             this data?' You save countless unnecessary truck rolls by catching sensor issues first.""",
-            retailer_id=site_id,
+            site_id=site_id,
         )
         super().__init__(config, PDMModelAgentRole.SENSOR_TRUST, event_bus, **kwargs)
         
@@ -408,7 +421,15 @@ class SensorTrustAgent(PDMModelAgent):
         
         # Import the actual service
         from ..services.sensor_trust_service import SensorTrustService
-        self.trust_service = SensorTrustService(site_id)
+        self._trust_services: Dict[str, SensorTrustService] = {}
+        self._trust_service_cls = SensorTrustService
+
+    def _get_trust_service(self, asset_id: str):
+        service = self._trust_services.get(asset_id)
+        if service is None:
+            service = self._trust_service_cls(asset_id)
+            self._trust_services[asset_id] = service
+        return service
     
     @property
     def handled_event_types(self) -> List[PdMEventType]:
@@ -419,6 +440,8 @@ class SensorTrustAgent(PDMModelAgent):
         from ..services.sensor_trust_service import SensorReading
         from ..core.schemas import SensorType
         
+        asset_id = inputs.get("asset_id", self.site_id)
+        trust_service = self._get_trust_service(asset_id)
         timestamp = inputs.get("timestamp", datetime.utcnow())
         trust_scores = {}
         untrusted_sensors = []
@@ -439,11 +462,11 @@ class SensorTrustAgent(PDMModelAgent):
             if key in inputs and inputs[key] is not None:
                 reading = SensorReading(
                     timestamp=timestamp,
-                    sensor_id=f"{self.site_id}_{key}",
+                    sensor_id=f"{asset_id}_{key}",
                     sensor_type=sensor_type,
                     value=float(inputs[key]),
                 )
-                trust = self.trust_service.process_reading(reading)
+                trust = trust_service.process_reading(reading)
                 trust_scores[key] = trust.trust_score
                 
                 if not trust.is_trusted():
@@ -480,9 +503,9 @@ class SensorTrustAgent(PDMModelAgent):
     
     def vote_on_decision(self, question: str, context: Dict[str, Any]) -> AgentVote:
         """Vote on decisions based on sensor trustworthiness"""
-        all_trust = self.trust_service.get_all_trust_scores()
-        min_trust = min([t.trust_score for t in all_trust.values()], default=1.0)
-        untrusted = self.trust_service.get_untrusted_sensors()
+        latest = self.get_latest_result()
+        min_trust = float(latest.result_data.get("min_trust", 1.0)) if latest else 1.0
+        untrusted = latest.result_data.get("untrusted_sensors", []) if latest else []
         
         if "should_alert" in question.lower() or "should_dispatch" in question.lower():
             if min_trust < 0.5:
@@ -546,7 +569,7 @@ class BehaviorModelAgent(PDMModelAgent):
             of refrigeration cycles and air handling. You know that expected behavior varies with 
             ambient temperature, load, and operating regime. You build accurate predictions that 
             serve as the baseline for detecting true deviations.""",
-            retailer_id=site_id,
+            site_id=site_id,
         )
         super().__init__(config, PDMModelAgentRole.BEHAVIOR_MODEL, event_bus, **kwargs)
         
@@ -557,8 +580,23 @@ class BehaviorModelAgent(PDMModelAgent):
         from ..services.behavior_service import BehaviorModelService
         from ..services.fingerprint_service import EquipmentFingerprintService
         
-        self.behavior_service = BehaviorModelService(site_id)
-        self.fingerprint_service = EquipmentFingerprintService(site_id)
+        self._behavior_services: Dict[str, BehaviorModelService] = {}
+        self._fingerprint_services: Dict[str, EquipmentFingerprintService] = {}
+        self._behavior_service_cls = BehaviorModelService
+        self._fingerprint_service_cls = EquipmentFingerprintService
+
+    def _get_services(self, asset_id: str):
+        behavior_service = self._behavior_services.get(asset_id)
+        if behavior_service is None:
+            behavior_service = self._behavior_service_cls(asset_id)
+            self._behavior_services[asset_id] = behavior_service
+
+        fingerprint_service = self._fingerprint_services.get(asset_id)
+        if fingerprint_service is None:
+            fingerprint_service = self._fingerprint_service_cls(asset_id)
+            self._fingerprint_services[asset_id] = fingerprint_service
+
+        return behavior_service, fingerprint_service
     
     @property
     def handled_event_types(self) -> List[PdMEventType]:
@@ -569,6 +607,8 @@ class BehaviorModelAgent(PDMModelAgent):
         from ..core.schemas import SensorType, OperatingRegime
         
         timestamp = inputs.get("timestamp", datetime.utcnow())
+        asset_id = inputs.get("asset_id", self.site_id)
+        behavior_service, fingerprint_service = self._get_services(asset_id)
         regime_str = inputs.get("regime", "unknown")
         try:
             regime = OperatingRegime(regime_str)
@@ -594,7 +634,7 @@ class BehaviorModelAgent(PDMModelAgent):
         for key, sensor_type in sensor_mapping.items():
             if key in inputs and inputs[key] is not None:
                 # Get prediction using hierarchical model
-                pred, uncertainty = self.fingerprint_service.predict_hierarchical(
+                pred, uncertainty = fingerprint_service.predict_hierarchical(
                     sensor_type, regime, context
                 )
                 predictions[key] = {"predicted": pred, "uncertainty": uncertainty}
@@ -610,10 +650,10 @@ class BehaviorModelAgent(PDMModelAgent):
                 }
                 
                 # Update models
-                self.behavior_service.update_with_observation(
+                behavior_service.update_with_observation(
                     observed, sensor_type, regime, context
                 )
-                self.fingerprint_service.observe(sensor_type, regime, observed, context)
+                fingerprint_service.observe(sensor_type, regime, observed, context)
         
         # Check for significant deviations
         significant_deviations = [
@@ -630,9 +670,9 @@ class BehaviorModelAgent(PDMModelAgent):
                 "predictions": predictions,
                 "residuals": residuals,
                 "significant_deviations": significant_deviations,
-                "fingerprint_confidence": self.fingerprint_service.local_adaptation.adaptation_confidence,
+                "fingerprint_confidence": fingerprint_service.local_adaptation.adaptation_confidence,
             },
-            confidence=self.fingerprint_service.local_adaptation.adaptation_confidence,
+            confidence=fingerprint_service.local_adaptation.adaptation_confidence,
             depends_on=self.upstream_agents,
             recommendations=[
                 f"Significant deviations in: {', '.join(significant_deviations)}"
@@ -717,7 +757,7 @@ class ChangeDetectionAgent(PDMModelAgent):
             You know that a single spike is not an alarm - what matters is persistent deviation. 
             You use CUSUM and GLR to detect when a system is 'no longer behaving like itself' 
             rather than flagging every unusual reading.""",
-            retailer_id=site_id,
+            site_id=site_id,
         )
         super().__init__(config, PDMModelAgentRole.CHANGE_DETECTION, event_bus, **kwargs)
         
@@ -726,7 +766,15 @@ class ChangeDetectionAgent(PDMModelAgent):
         
         # Import service
         from ..services.change_detection_service import SequentialChangeDetectionService
-        self.change_service = SequentialChangeDetectionService(site_id)
+        self._change_services: Dict[str, SequentialChangeDetectionService] = {}
+        self._change_service_cls = SequentialChangeDetectionService
+
+    def _get_change_service(self, asset_id: str):
+        service = self._change_services.get(asset_id)
+        if service is None:
+            service = self._change_service_cls(asset_id)
+            self._change_services[asset_id] = service
+        return service
     
     @property
     def handled_event_types(self) -> List[PdMEventType]:
@@ -737,6 +785,8 @@ class ChangeDetectionAgent(PDMModelAgent):
         from ..core.schemas import OperatingRegime, SensorType, ResidualObservation
         
         timestamp = inputs.get("timestamp", datetime.utcnow())
+        asset_id = inputs.get("asset_id", self.site_id)
+        change_service = self._get_change_service(asset_id)
         regime_str = inputs.get("regime", "unknown")
         try:
             regime = OperatingRegime(regime_str)
@@ -745,25 +795,42 @@ class ChangeDetectionAgent(PDMModelAgent):
         
         residuals = inputs.get("residuals", {})
         sensor_trust = inputs.get("sensor_trust", 1.0)
+
+        sensor_mapping = {
+            "suction_pressure": SensorType.SUCTION_PRESSURE,
+            "discharge_pressure": SensorType.DISCHARGE_PRESSURE,
+            "suction_line_temp": SensorType.SUCTION_LINE_TEMP,
+            "liquid_line_temp": SensorType.LIQUID_LINE_TEMP,
+            "compressor_current": SensorType.COMPRESSOR_CURRENT,
+            "compressor_power": SensorType.COMPRESSOR_POWER,
+            "return_air_temp": SensorType.RETURN_AIR_TEMP,
+            "supply_air_temp": SensorType.SUPPLY_AIR_TEMP,
+            "ambient_temp": SensorType.AMBIENT_TEMP,
+            "zone_temp": SensorType.ZONE_TEMP,
+        }
         
         change_results = {}
         changes_detected = []
         
         for sensor_key, residual_data in residuals.items():
+            sensor_type = sensor_mapping.get(sensor_key)
+            if sensor_type is None:
+                continue
             # Create residual observation
             obs = ResidualObservation(
                 timestamp=timestamp,
-                sensor_id=f"{self.site_id}_{sensor_key}",
-                sensor_type=SensorType.SUCTION_PRESSURE,  # Would map properly
+                sensor_id=f"{asset_id}_{sensor_key}",
+                sensor_type=sensor_type,
                 regime=regime,
                 observed=residual_data.get("observed", 0),
                 predicted=residual_data.get("predicted", 0),
                 residual=residual_data.get("residual", 0),
                 z_score=residual_data.get("z_score"),
+                log_likelihood=residual_data.get("log_likelihood"),
             )
             
             # Process through change detector
-            detection = self.change_service.process_observation(obs, regime, sensor_trust)
+            detection = change_service.process_observation(obs, regime, sensor_trust)
             
             change_results[sensor_key] = {
                 "change_detected": detection.change_detected,
@@ -879,7 +946,7 @@ class FaultHypothesisAgent(PDMModelAgent):
             single fault label is often wrong. Instead, you maintain probability distributions 
             over fault hypotheses, gathering evidence until confidence is high enough for action. 
             You know that 'I don't know yet' is a valid answer that prevents false diagnoses.""",
-            retailer_id=site_id,
+            site_id=site_id,
         )
         super().__init__(config, PDMModelAgentRole.FAULT_HYPOTHESIS, event_bus, **kwargs)
         
@@ -888,7 +955,15 @@ class FaultHypothesisAgent(PDMModelAgent):
         
         # Import service
         from ..services.fault_hypothesis_service import FaultHypothesisService
-        self.hypothesis_service = FaultHypothesisService(site_id)
+        self._hypothesis_services: Dict[str, FaultHypothesisService] = {}
+        self._hypothesis_service_cls = FaultHypothesisService
+
+    def _get_hypothesis_service(self, asset_id: str):
+        service = self._hypothesis_services.get(asset_id)
+        if service is None:
+            service = self._hypothesis_service_cls(asset_id)
+            self._hypothesis_services[asset_id] = service
+        return service
     
     @property
     def handled_event_types(self) -> List[PdMEventType]:
@@ -896,31 +971,88 @@ class FaultHypothesisAgent(PDMModelAgent):
     
     def analyze(self, inputs: Dict[str, Any]) -> AgentAnalysisResult:
         """Update fault hypothesis based on evidence"""
-        from ..core.schemas import SensorType
+        from ..core.schemas import (
+            ChangePointDetection,
+            OperatingRegime,
+            ResidualObservation,
+            SensorType,
+        )
+
+        asset_id = inputs.get("asset_id", self.site_id)
+        hypothesis_service = self._get_hypothesis_service(asset_id)
         
         # Extract symptoms from inputs
         residuals = inputs.get("residuals", {})
         changes = inputs.get("change_detections", {})
         telemetry = inputs.get("telemetry", {})
+
+        regime_str = inputs.get("regime", "unknown")
+        try:
+            regime = OperatingRegime(regime_str)
+        except ValueError:
+            regime = OperatingRegime.UNKNOWN
+
+        sensor_mapping = {
+            "suction_pressure": SensorType.SUCTION_PRESSURE,
+            "discharge_pressure": SensorType.DISCHARGE_PRESSURE,
+            "suction_line_temp": SensorType.SUCTION_LINE_TEMP,
+            "liquid_line_temp": SensorType.LIQUID_LINE_TEMP,
+            "compressor_current": SensorType.COMPRESSOR_CURRENT,
+            "compressor_power": SensorType.COMPRESSOR_POWER,
+            "return_air_temp": SensorType.RETURN_AIR_TEMP,
+            "supply_air_temp": SensorType.SUPPLY_AIR_TEMP,
+            "ambient_temp": SensorType.AMBIENT_TEMP,
+            "zone_temp": SensorType.ZONE_TEMP,
+        }
         
         # Build residual observations dict
-        residual_obs = {}
-        # Would convert properly in production
+        residual_obs: Dict[SensorType, ResidualObservation] = {}
+        timestamp = inputs.get("timestamp", datetime.utcnow())
+        for sensor_key, residual_data in residuals.items():
+            sensor_type = sensor_mapping.get(sensor_key)
+            if sensor_type is None:
+                continue
+            residual_obs[sensor_type] = ResidualObservation(
+                timestamp=timestamp,
+                sensor_id=f"{asset_id}_{sensor_key}",
+                sensor_type=sensor_type,
+                regime=regime,
+                observed=float(residual_data.get("observed", 0.0) or 0.0),
+                predicted=float(residual_data.get("predicted", 0.0) or 0.0),
+                residual=float(residual_data.get("residual", 0.0) or 0.0),
+                z_score=residual_data.get("z_score"),
+                log_likelihood=residual_data.get("log_likelihood"),
+            )
+
+        change_detections: Dict[str, ChangePointDetection] = {}
+        for sensor_key, detection_data in changes.items():
+            sensor_type = sensor_mapping.get(sensor_key)
+            if sensor_type is None:
+                continue
+            change_detections[f"{asset_id}_{sensor_key}"] = ChangePointDetection(
+                asset_id=asset_id,
+                sensor_type=sensor_type,
+                change_detected=bool(detection_data.get("change_detected", False)),
+                change_score=float(detection_data.get("change_score", 0.0) or 0.0),
+                anomaly_duration_hours=float(detection_data.get("duration_hours", 0.0) or 0.0),
+                n_regimes_observed=int(detection_data.get("n_regimes_observed", 0) or 0),
+                stability_score=float(detection_data.get("stability_score", 0.0) or 0.0),
+            )
         
         # Extract symptoms
-        symptoms = self.hypothesis_service.extract_symptoms(
-            residual_obs, changes, telemetry
+        symptoms = hypothesis_service.extract_symptoms(
+            residual_obs, change_detections, telemetry
         )
         
         # Update hypothesis
         if symptoms:
-            hypothesis = self.hypothesis_service.update_hypothesis(symptoms)
+            hypothesis = hypothesis_service.update_hypothesis(symptoms)
         else:
-            hypothesis = self.hypothesis_service.current_hypothesis
+            hypothesis = hypothesis_service.current_hypothesis
         
         if hypothesis:
-            top_faults = self.hypothesis_service.get_top_hypotheses(3)
-            is_confident = self.hypothesis_service.is_diagnosis_confident()
+            top_faults = hypothesis_service.get_top_hypotheses(3)
+            is_confident = hypothesis_service.is_diagnosis_confident()
             
             result_data = {
                 "belief_distribution": hypothesis.get_belief_distribution(),
@@ -1041,7 +1173,7 @@ class DecisionPolicyAgent(PDMModelAgent):
             balancing detection sensitivity against alarm fatigue. You aggregate opinions from 
             specialist agents, apply operational constraints (e.g., max alarms per month), and 
             make decisions that optimize technician efficiency and customer satisfaction.""",
-            retailer_id=site_id,
+            site_id=site_id,
         )
         super().__init__(config, PDMModelAgentRole.DECISION_POLICY, event_bus, **kwargs)
         
@@ -1060,10 +1192,25 @@ class DecisionPolicyAgent(PDMModelAgent):
             max_actionable_alarms_per_unit_per_month=0.3,
             max_no_issue_found_rate=0.05,
         )
-        self.decision_service = DecisionPolicyService(site_id, budget)
+        self._decision_budget_template = budget
+        self._decision_services: Dict[str, DecisionPolicyService] = {}
+        self._decision_service_cls = DecisionPolicyService
         
         # Track collaborative decisions
         self.decision_history: List[CollaborativeDecision] = []
+
+    def _get_decision_service(self, asset_id: str):
+        service = self._decision_services.get(asset_id)
+        if service is None:
+            from ..core.schemas import FalsePositiveBudget
+
+            budget = FalsePositiveBudget(
+                max_actionable_alarms_per_unit_per_month=self._decision_budget_template.max_actionable_alarms_per_unit_per_month,
+                max_no_issue_found_rate=self._decision_budget_template.max_no_issue_found_rate,
+            )
+            service = self._decision_service_cls(asset_id, budget)
+            self._decision_services[asset_id] = service
+        return service
     
     @property
     def handled_event_types(self) -> List[PdMEventType]:
@@ -1071,12 +1218,14 @@ class DecisionPolicyAgent(PDMModelAgent):
     
     def analyze(self, inputs: Dict[str, Any]) -> AgentAnalysisResult:
         """This agent doesn't analyze - it orchestrates decisions"""
+        asset_id = inputs.get("asset_id", self.site_id)
+        decision_service = self._get_decision_service(asset_id)
         return AgentAnalysisResult(
             agent_id=self.config.agent_id,
             agent_role=self.model_role,
             timestamp=datetime.utcnow(),
             result_type="policy_status",
-            result_data=self.decision_service.get_policy_summary(),
+            result_data=decision_service.get_policy_summary(),
             confidence=1.0,
         )
     
@@ -1169,7 +1318,9 @@ class DecisionPolicyAgent(PDMModelAgent):
     
     def vote_on_decision(self, question: str, context: Dict[str, Any]) -> AgentVote:
         """The decision policy agent applies budget constraints"""
-        budget = self.decision_service.budget
+        asset_id = context.get("asset_id", self.site_id)
+        decision_service = self._get_decision_service(asset_id)
+        budget = decision_service.budget
         
         if "should_alert" in question.lower():
             # Check budget constraints

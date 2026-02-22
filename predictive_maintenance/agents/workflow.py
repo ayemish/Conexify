@@ -522,6 +522,7 @@ class CollaborativeDecisionWorkflow:
         """Run collaborative voting among all agents"""
         # Build voting context
         voting_context = {
+            "asset_id": context.asset_id,
             "regime": context.regime_result.result_data.get("regime") if context.regime_result else None,
             "sensor_trust": context.trust_result.result_data.get("min_trust", 1.0) if context.trust_result else 1.0,
             "is_steady_state": context.regime_result.result_data.get("is_steady_state", False) if context.regime_result else False,

@@ -450,6 +450,7 @@ class PDMModelOrchestrator:
         # =====================================================================
         # Prepare decision context
         decision_context = {
+            "asset_id": telemetry.asset_id,
             "regime": regime_result.result_data.get("regime"),
             "sensor_trust": trust_result.result_data.get("min_trust", 1.0),
             "changes_detected": change_result.result_data.get("changes_detected", []),

@@ -110,6 +110,60 @@ class PipelineConfig:
     model_registry_name: str = "pdm-fault-detector"
 
 
+class ModelTrainer:
+    """Pluggable trainer interface for retraining pipelines."""
+
+    def train(
+        self,
+        training_data: List[Dict[str, Any]],
+        job: RetrainingJob,
+    ) -> Dict[str, float]:
+        raise NotImplementedError
+
+
+class DeterministicBaselineTrainer(ModelTrainer):
+    """Deterministic baseline trainer for environments without full ML training stack."""
+
+    def train(
+        self,
+        training_data: List[Dict[str, Any]],
+        job: RetrainingJob,
+    ) -> Dict[str, float]:
+        n = len(training_data)
+        if n == 0:
+            return {
+                "accuracy": 0.0,
+                "precision": 0.0,
+                "recall": 0.0,
+                "f1_score": 0.0,
+                "false_positive_rate": 0.0,
+                "training_samples": 0.0,
+            }
+
+        labels = [1 if int(row.get("label", 0)) == 1 else 0 for row in training_data]
+        predicted = [1 if float(row.get("confidence", 0.0) or 0.0) >= 0.5 else 0 for row in training_data]
+
+        tp = sum(1 for p, y in zip(predicted, labels) if p == 1 and y == 1)
+        tn = sum(1 for p, y in zip(predicted, labels) if p == 0 and y == 0)
+        fp = sum(1 for p, y in zip(predicted, labels) if p == 1 and y == 0)
+        fn = sum(1 for p, y in zip(predicted, labels) if p == 0 and y == 1)
+
+        accuracy = (tp + tn) / max(n, 1)
+        precision = tp / max(tp + fp, 1)
+        recall = tp / max(tp + fn, 1)
+        f1 = (2 * precision * recall) / max(precision + recall, 1e-12)
+        fpr = fp / max(fp + tn, 1)
+
+        return {
+            "accuracy": float(round(accuracy, 6)),
+            "precision": float(round(precision, 6)),
+            "recall": float(round(recall, 6)),
+            "f1_score": float(round(f1, 6)),
+            "false_positive_rate": float(round(fpr, 6)),
+            "training_samples": float(n),
+        }
+
+
 class MLflowRetrainingPipeline:
     """
     End-to-end retraining pipeline with MLflow integration.
@@ -124,7 +178,11 @@ class MLflowRetrainingPipeline:
     7. Promote to production after canary period
     """
     
-    def __init__(self, config: PipelineConfig = None):
+    def __init__(
+        self,
+        config: PipelineConfig = None,
+        trainer: Optional[ModelTrainer] = None,
+    ):
         self.config = config or PipelineConfig()
         self._feedback_buffer: List[FeedbackRecord] = []
         self._jobs: Dict[str, RetrainingJob] = {}
@@ -132,6 +190,7 @@ class MLflowRetrainingPipeline:
         self._last_retrain: Dict[str, datetime] = {}
         
         self._mlflow_client: Optional[MlflowClient] = None
+        self._trainer: ModelTrainer = trainer or DeterministicBaselineTrainer()
         self._initialize_mlflow()
     
     def _initialize_mlflow(self):
@@ -325,19 +384,8 @@ class MLflowRetrainingPipeline:
         training_data: List[Dict[str, Any]],
         job: RetrainingJob,
     ) -> Dict[str, float]:
-        """Train model (placeholder for actual training logic)"""
-        n_samples = len(training_data)
-        
-        metrics = {
-            "accuracy": 0.85 + np.random.random() * 0.10,
-            "precision": 0.82 + np.random.random() * 0.12,
-            "recall": 0.88 + np.random.random() * 0.08,
-            "f1_score": 0.85 + np.random.random() * 0.10,
-            "false_positive_rate": 0.05 + np.random.random() * 0.05,
-            "training_samples": float(n_samples),
-        }
-        
-        return metrics
+        """Train model through pluggable trainer interface."""
+        return self._trainer.train(training_data=training_data, job=job)
     
     def _register_model(self, job: RetrainingJob) -> str:
         """Register model version in MLflow Model Registry"""

@@ -47,6 +47,21 @@ from .protocols import (
     EscalationProtocol,
     ConsensusProtocol,
 )
+from .sensor_coverage_agent import SensorCoverageAgent
+from .dag_orchestration_agent import DAGOrchestrationAgent
+from .federated_learning_agent import FederatedLearningAgent
+from .knowledge_graph_agent import KnowledgeGraphAgent
+from .ontology_agent import OntologyAgent
+from .parts_inventory_agent import PartsInventoryAgent
+from .technician_scheduling_agent import TechnicianSchedulingAgent
+from .scenario_agents import (
+    BudgetScenarioAgent,
+    RiskScenarioAgent,
+    PaybackScenarioAgent,
+    ScenarioContext,
+    ScenarioAgentResult,
+)
+from .crews import CREW_REGISTRY
 
 __all__ = [
     # Model Agents
@@ -81,4 +96,23 @@ __all__ = [
     "VotingProtocol",
     "EscalationProtocol",
     "ConsensusProtocol",
+    
+    # New CrewAI Agents (Phase 2-6)
+    "SensorCoverageAgent",
+    "DAGOrchestrationAgent",
+    "FederatedLearningAgent",
+    "KnowledgeGraphAgent",
+    "OntologyAgent",
+    "PartsInventoryAgent",
+    "TechnicianSchedulingAgent",
+    
+    # Scenario Agents
+    "BudgetScenarioAgent",
+    "RiskScenarioAgent",
+    "PaybackScenarioAgent",
+    "ScenarioContext",
+    "ScenarioAgentResult",
+    
+    # Crew compositions
+    "CREW_REGISTRY",
 ]

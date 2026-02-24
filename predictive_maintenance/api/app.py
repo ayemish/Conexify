@@ -5,6 +5,7 @@ Main application factory and configuration.
 """
 
 import logging
+import os
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -18,13 +19,21 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler with comprehensive startup validation."""
+    settings = getattr(app.state, "settings", None)
+    if settings is None:
+        try:
+            from ..config import get_settings
+            get_settings.cache_clear()
+            settings = get_settings()
+        except Exception:
+            settings = None
+
     # Startup
     logger.info("PDM API starting up...")
     startup_checks = {}
     
     # 1. Validate configuration
     try:
-        from ..config import settings
         assert settings.database.url, "Database URL not configured"
         startup_checks["config"] = True
         logger.info("Configuration validated (env=%s)", settings.environment)
@@ -174,11 +183,19 @@ def create_app(
         openapi_url="/openapi.json",
         openapi_tags=openapi_tags,
     )
+
+    app_settings = None
+    try:
+        from ..config import get_settings
+        get_settings.cache_clear()
+        app_settings = get_settings()
+    except Exception as exc:
+        logger.warning("Settings load failed during app creation: %s", exc)
+    app.state.settings = app_settings
     
     # Configure CORS
     try:
-        from ..config import settings
-        cors_origins = settings.api.cors_origins
+        cors_origins = app_settings.api.cors_origins if app_settings else ["*"]
     except Exception:
         cors_origins = ["*"]
     
@@ -197,21 +214,43 @@ def create_app(
     app.add_middleware(TracingMiddleware)
     
     # Add API key authentication middleware
+    _auth_strict = os.getenv("PDM_ENVIRONMENT", "development").lower() == "production"
     try:
-        from ..config import settings as _auth_cfg
         from .auth import APIKeyMiddleware
+        _auth_cfg = app_settings
+        _auth_strict = bool(getattr(_auth_cfg, "is_production", _auth_strict))
+        env_api_keys = [
+            key.strip()
+            for key in os.getenv("PDM_API_KEYS", "").split(",")
+            if key.strip()
+        ]
+        api_keys = env_api_keys or list(getattr(getattr(_auth_cfg, "api", None), "api_keys", []) or [])
+        header_name = (
+            os.getenv("PDM_API_KEY_HEADER")
+            or getattr(getattr(_auth_cfg, "api", None), "api_key_header", "X-API-Key")
+            or "X-API-Key"
+        )
+        if _auth_strict and not api_keys:
+            raise RuntimeError(
+                "PDM_API_KEYS is required in production; refusing to start with auth disabled."
+            )
         app.add_middleware(
             APIKeyMiddleware,
-            api_keys=_auth_cfg.api.api_keys,
-            header_name=_auth_cfg.api.api_key_header,
+            api_keys=api_keys,
+            header_name=header_name,
         )
     except Exception as e:
+        if _auth_strict:
+            logger.error("FATAL: API key auth middleware initialization failed in production: %s", e)
+            raise RuntimeError(
+                f"Auth middleware initialization failed in production: {e}"
+            ) from e
         logger.warning(f"API key auth middleware not available: {e}")
 
     # Add rate limiting middleware
     try:
-        from ..config import settings as _cfg
         from .rate_limiter import RateLimiterMiddleware
+        _cfg = app_settings
         app.add_middleware(
             RateLimiterMiddleware,
             max_requests=_cfg.api.rate_limit_requests,
@@ -245,12 +284,7 @@ def create_app(
     # ── Route registration ───────────────────────────────────────────
     # In production, route import failures are FATAL (no silent degradation).
     # In development/test, they are logged as warnings for convenience.
-    _strict = False
-    try:
-        from ..config import settings as _route_cfg
-        _strict = _route_cfg.is_production
-    except Exception:
-        pass
+    _strict = bool(getattr(app_settings, "is_production", False))
 
     _failed_routers: list = []
 

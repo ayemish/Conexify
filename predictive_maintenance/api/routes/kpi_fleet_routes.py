@@ -20,6 +20,15 @@ from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
+
+def _warning_entry(code: str, message: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Build a structured warning payload for API responses."""
+    return {
+        "code": code,
+        "message": message,
+        "context": context or {},
+    }
+
 # ═══════════════════════════════════════════════════════════════════════
 # Schemas
 # ═══════════════════════════════════════════════════════════════════════
@@ -36,6 +45,9 @@ class KPIDashboardResponse(BaseModel):
     roi: Dict[str, Any]
     governance: Dict[str, Any]
     budget: Optional[Dict[str, Any]] = None
+    data_source: str = "deterministic_kpi_orchestrator"
+    degraded_mode: bool = False
+    warnings: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class FleetAssetResponse(BaseModel):
@@ -67,6 +79,8 @@ class FleetAssetsListResponse(BaseModel):
     total: int = 0
     offset: int = 0
     limit: int = 50
+    degraded_mode: bool = False
+    warnings: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class FleetMetricsResponse(BaseModel):
@@ -76,6 +90,8 @@ class FleetMetricsResponse(BaseModel):
     total_assets: int = 0
     avg_health_score: float = 100.0
     critical_count: int = 0
+    degraded_mode: bool = False
+    warnings: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class UploadResponse(BaseModel):
@@ -84,6 +100,9 @@ class UploadResponse(BaseModel):
     records_failed: int = 0
     asset_ids: List[str] = Field(default_factory=list)
     message: str = ""
+    data_source: str = "csv_upload"
+    degraded_mode: bool = False
+    warnings: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class CapExPlanResponse(BaseModel):
@@ -536,6 +555,9 @@ def _dashboard_from_loweconex(site_id: str, composite: Dict[str, Any]) -> Dict[s
         "location_ranking": location_ranking,
         "roi": composite.get("roi_metrics", {}) or {},
         "governance": governance,
+        "data_source": "loweconex_orchestrator_crew",
+        "degraded_mode": False,
+        "warnings": [],
     }
 
 
@@ -551,6 +573,9 @@ def compute_dashboard_data(
     custom_scenario_params: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Compute dashboard output using orchestrator crew by default with deterministic fallback."""
+    warnings_out: List[Dict[str, Any]] = []
+    degraded_mode = False
+
     # OrchestratorCrew (CrewAI) path — enabled when loweconex_platform + CrewAI are installed.
     # Set PDM_SKIP_CREW_ENRICHMENT=true to disable.
     import os as _os
@@ -580,9 +605,25 @@ def compute_dashboard_data(
                 run_scenarios=run_scenarios,
                 custom_scenario_params=custom_scenario_params,
             )
-            return _dashboard_from_loweconex(site_id, composite)
+            dashboard = _dashboard_from_loweconex(site_id, composite)
+            dashboard["warnings"] = warnings_out
+            dashboard["degraded_mode"] = degraded_mode
+            return dashboard
         except Exception as orch_err:
             logger.info("Loweconex orchestrator path unavailable, using deterministic KPI orchestrator: %s", orch_err)
+            degraded_mode = True
+            warnings_out.append(
+                _warning_entry(
+                    "LOWECONEX_ORCHESTRATOR_UNAVAILABLE",
+                    "Loweconex orchestrator path failed; deterministic orchestrator fallback activated.",
+                    {"site_id": site_id, "error": str(orch_err)},
+                )
+            )
+            try:
+                from ...observability.metrics import metrics
+                metrics.record_kpi_enrichment_failure(site_id=site_id, enrichment_type="loweconex_orchestrator")
+            except Exception as metrics_err:
+                logger.debug("Metrics emission skipped (loweconex_orchestrator): %s", metrics_err)
     else:
         logger.info("CrewAI orchestrator disabled — using deterministic KPI orchestrator")
 
@@ -632,6 +673,9 @@ def compute_dashboard_data(
     if not run_scenarios:
         result_dict["scenario_comparison"] = []
     result_dict.setdefault("governance", {})["source_orchestrator"] = "deterministic_kpi_orchestrator"
+    result_dict["data_source"] = "deterministic_kpi_orchestrator"
+    result_dict["degraded_mode"] = degraded_mode
+    result_dict.setdefault("warnings", []).extend(warnings_out)
     return result_dict
 
 
@@ -640,6 +684,7 @@ def _enrich_kpis_from_capex(
     result_dict: Dict[str, Any],
     asset_data: List[Dict[str, Any]],
     health_data: List[Dict[str, Any]],
+    warnings_out: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """T2-8: Cross-reference CapEx engine outputs into capex/asset KPI scorecards.
 
@@ -667,8 +712,15 @@ def _enrich_kpis_from_capex(
                     if isinstance(install, str):
                         install = datetime.fromisoformat(install)
                     age = max(1, (datetime.now(timezone.utc) - install).days // 365)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    if warnings_out is not None:
+                        warnings_out.append(
+                            _warning_entry(
+                                "ASSET_INSTALL_DATE_PARSE_FAILED",
+                                "Failed to parse install date; using default asset age.",
+                                {"site_id": site_id, "asset_id": aid, "error": str(exc)},
+                            )
+                        )
 
             enriched_assets.append({**a, "age_years": age, "asset_type": a.get("asset_type", "RTU").upper()})
             hs = h.get("health_score", 80)
@@ -714,7 +766,20 @@ def _enrich_kpis_from_capex(
 
         logger.info("CapEx engine enriched KPI dashboard: NPV=%s, assets=%s", total_npv, assets_selected)
     except Exception as e:
-        logger.debug("CapEx KPI enrichment skipped: %s", e)
+        logger.warning("CapEx KPI enrichment skipped: %s", e)
+        if warnings_out is not None:
+            warnings_out.append(
+                _warning_entry(
+                    "CAPEX_ENRICHMENT_FAILED",
+                    "CapEx enrichment failed; returning dashboard without CapEx-linked enhancements.",
+                    {"site_id": site_id, "error": str(e)},
+                )
+            )
+        try:
+            from ...observability.metrics import metrics
+            metrics.record_kpi_enrichment_failure(site_id=site_id, enrichment_type="capex")
+        except Exception as metrics_err:
+            logger.debug("Metrics emission skipped (capex): %s", metrics_err)
 
     return result_dict
 
@@ -740,6 +805,9 @@ async def get_kpi_dashboard(site_id: str, force_recompute: bool = False):
     if not force_recompute:
         cached = cache.get(site_id)
         if cached:
+            cached.setdefault("data_source", "deterministic_kpi_orchestrator")
+            cached.setdefault("degraded_mode", False)
+            cached.setdefault("warnings", [])
             try:
                 from ...services.advisor import get_shared_advisor
                 get_shared_advisor()._index_kpi_dashboard(site_id=site_id, dashboard=cached)
@@ -778,13 +846,23 @@ async def get_kpi_dashboard(site_id: str, force_recompute: bool = False):
         run_scenarios=True,
         implementation_cost=impl_cost,
     )
+    result_dict.setdefault("warnings", [])
+    result_dict.setdefault("degraded_mode", False)
+    result_dict.setdefault("data_source", "deterministic_kpi_orchestrator")
 
     # Attach budget context to the result so frontend can display it
     if budget_data:
         result_dict["budget"] = budget_data
 
     # T2-8: Enrich CapEx-related KPIs with actual CapEx engine outputs
-    result_dict = _enrich_kpis_from_capex(site_id, result_dict, asset_data, health_data)
+    result_dict = _enrich_kpis_from_capex(
+        site_id,
+        result_dict,
+        asset_data,
+        health_data,
+        warnings_out=result_dict["warnings"],
+    )
+    result_dict["degraded_mode"] = bool(result_dict["degraded_mode"] or result_dict["warnings"])
 
     # Keep conversational RAG synchronized with the latest KPI dashboard.
     try:
@@ -1098,8 +1176,13 @@ async def get_capex_plan(
                 if isinstance(install, str):
                     install = _dt.fromisoformat(install)
                 age = max(1, (datetime.now(timezone.utc) - install).days // 365)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning(
+                    "CapEx asset age fallback due to install_date parse failure: site_id=%s asset_id=%s error=%s",
+                    site_id,
+                    aid,
+                    exc,
+                )
 
         enriched = {
             **a,
@@ -1477,6 +1560,10 @@ async def upload_csv(
     records_processed = 0
     records_failed = 0
     asset_ids_seen = set()
+    warnings_out: List[Dict[str, Any]] = []
+    degraded_mode = False
+    dropped_rows = 0
+    skipped_value_parses = 0
 
     # Mapping from common CSV column names to our telemetry fields
     FIELD_MAP = {
@@ -1496,12 +1583,26 @@ async def upload_csv(
     }
 
     batch = []
-    for row in reader:
+    for row_index, row in enumerate(reader, start=1):
         try:
             asset_id = row.get(asset_id_column, "").strip()
             ts_raw = row.get(timestamp_column, "").strip()
             if not asset_id or not ts_raw:
                 records_failed += 1
+                dropped_rows += 1
+                degraded_mode = True
+                warnings_out.append(
+                    _warning_entry(
+                        "ROW_MISSING_REQUIRED_FIELDS",
+                        "Row missing required asset_id or timestamp; row dropped.",
+                        {"site_id": site_id, "row_index": row_index},
+                    )
+                )
+                try:
+                    from ...observability.metrics import metrics
+                    metrics.record_upload_rows_dropped(site_id=site_id, reason="missing_required_fields")
+                except Exception as metrics_err:
+                    logger.debug("Metrics emission skipped (missing_required_fields): %s", metrics_err)
                 continue
 
             # Parse timestamp
@@ -1514,6 +1615,20 @@ async def upload_csv(
                     continue
             if ts is None:
                 records_failed += 1
+                dropped_rows += 1
+                degraded_mode = True
+                warnings_out.append(
+                    _warning_entry(
+                        "ROW_TIMESTAMP_PARSE_FAILED",
+                        "Timestamp parsing failed; row dropped.",
+                        {"site_id": site_id, "row_index": row_index, "timestamp": ts_raw},
+                    )
+                )
+                try:
+                    from ...observability.metrics import metrics
+                    metrics.record_upload_rows_dropped(site_id=site_id, reason="timestamp_parse_failed")
+                except Exception as metrics_err:
+                    logger.debug("Metrics emission skipped (timestamp_parse_failed): %s", metrics_err)
                 continue
 
             # Build telemetry dict
@@ -1533,7 +1648,22 @@ async def upload_csv(
                             else:
                                 telemetry[target_field] = float(val)
                         except (ValueError, TypeError):
-                            pass
+                            skipped_value_parses += 1
+                            degraded_mode = True
+                            if skipped_value_parses <= 20:
+                                warnings_out.append(
+                                    _warning_entry(
+                                        "FIELD_PARSE_FAILED",
+                                        "Non-numeric telemetry field skipped.",
+                                        {
+                                            "site_id": site_id,
+                                            "row_index": row_index,
+                                            "asset_id": asset_id,
+                                            "field": target_field,
+                                            "raw_value": str(val),
+                                        },
+                                    )
+                                )
                         break
 
             batch.append(telemetry)
@@ -1543,6 +1673,20 @@ async def upload_csv(
         except Exception as e:
             logger.debug("Row parse error: %s", e)
             records_failed += 1
+            dropped_rows += 1
+            degraded_mode = True
+            warnings_out.append(
+                _warning_entry(
+                    "ROW_PARSE_EXCEPTION",
+                    "Unexpected row parsing error; row dropped.",
+                    {"site_id": site_id, "row_index": row_index, "error": str(e)},
+                )
+            )
+            try:
+                from ...observability.metrics import metrics
+                metrics.record_upload_rows_dropped(site_id=site_id, reason="row_parse_exception")
+            except Exception as metrics_err:
+                logger.debug("Metrics emission skipped (row_parse_exception): %s", metrics_err)
 
     # Persist to database
     persisted = 0
@@ -1567,6 +1711,14 @@ async def upload_csv(
             session.commit()
     except Exception as e:
         logger.warning("Persistence failed, data processed in-memory only: %s", e)
+        degraded_mode = True
+        warnings_out.append(
+            _warning_entry(
+                "PERSISTENCE_FAILED",
+                "Database persistence failed; continuing in degraded in-memory mode.",
+                {"site_id": site_id, "error": str(e)},
+            )
+        )
 
     # Feed through loweconex ingestion pipeline (Normalizer → TwinStore)
     ingestion_stats = {}
@@ -1636,6 +1788,19 @@ async def upload_csv(
     except Exception as e:
         logger.warning("Loweconex ingestion pipeline error: %s", e)
         ingestion_stats["error"] = str(e)
+        degraded_mode = True
+        warnings_out.append(
+            _warning_entry(
+                "INGESTION_ENRICHMENT_FAILED",
+                "Loweconex ingestion enrichment failed; upload persisted without enrichment.",
+                {"site_id": site_id, "error": str(e)},
+            )
+        )
+        try:
+            from ...observability.metrics import metrics
+            metrics.record_kpi_enrichment_failure(site_id=site_id, enrichment_type="ingestion_normalizer")
+        except Exception as metrics_err:
+            logger.debug("Metrics emission skipped (ingestion_normalizer): %s", metrics_err)
 
     # Feed through PdM systems
     pdm_processed = 0
@@ -1648,10 +1813,25 @@ async def upload_csv(
                 if system:
                     system.process_reading(record)
                     pdm_processed += 1
-            except Exception:
-                pass
+            except Exception as exc:
+                degraded_mode = True
+                warnings_out.append(
+                    _warning_entry(
+                        "PDM_RUNTIME_PROCESSING_FAILED",
+                        "PdM runtime processing failed for an uploaded record; continuing.",
+                        {"site_id": site_id, "asset_id": aid, "error": str(exc)},
+                    )
+                )
     except Exception as e:
         logger.debug("PdM processing: %s", e)
+        degraded_mode = True
+        warnings_out.append(
+            _warning_entry(
+                "PDM_RUNTIME_UNAVAILABLE",
+                "PdM runtime unavailable during upload post-processing.",
+                {"site_id": site_id, "error": str(e)},
+            )
+        )
 
     ingestion_msg = ""
     if ingestion_stats.get("normalized_records"):
@@ -1680,8 +1860,22 @@ async def upload_csv(
                 "asset_ids": sorted(asset_ids_seen),
                 "message": "New data uploaded — KPI dashboard will refresh on next load.",
             }))
-        except Exception:
-            pass
+        except Exception as ws_err:
+            degraded_mode = True
+            warnings_out.append(
+                _warning_entry(
+                    "WEBSOCKET_BROADCAST_FAILED",
+                    "Operator websocket broadcast failed after upload.",
+                    {"site_id": site_id, "error": str(ws_err)},
+                )
+            )
+
+    if dropped_rows > 0:
+        try:
+            from ...observability.metrics import metrics
+            metrics.record_upload_rows_dropped(site_id=site_id, reason="dropped_rows_total", count=dropped_rows)
+        except Exception as metrics_err:
+            logger.debug("Metrics emission skipped (dropped_rows_total): %s", metrics_err)
 
     return UploadResponse(
         status="success" if records_processed > 0 else "no_data",
@@ -1693,6 +1887,9 @@ async def upload_csv(
             f"{persisted} persisted to DB. {pdm_processed} processed through PdM pipeline."
             f"{ingestion_msg}"
         ),
+        data_source="csv_upload",
+        degraded_mode=degraded_mode,
+        warnings=warnings_out,
     )
 
 
@@ -1732,8 +1929,8 @@ def _resolve_float(row: Dict, candidates: List[str]) -> Optional[float]:
     if v:
         try:
             return float(v.replace(",", "").replace("$", ""))
-        except (ValueError, TypeError):
-            pass
+        except (ValueError, TypeError) as exc:
+            logger.debug("Float parse failed for value '%s': %s", v, exc)
     return None
 
 

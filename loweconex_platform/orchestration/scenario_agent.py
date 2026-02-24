@@ -4,16 +4,35 @@ to produce what-if scenario comparisons.
 
 Supports Conservative, Expected, and Aggressive scenario profiles
 plus custom parameter overrides.
+
+Now includes CrewAI @tool functions for LLM-powered scenario reasoning
+and a scenario_manager_agent for Crew orchestration.
 """
 
 from __future__ import annotations
 
 import copy
+import json
 import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional
+
+from shared.agents.crewai_base import Agent, CREWAI_AVAILABLE
+
+# CrewAI @tool decorator with fallback
+try:
+    from crewai.tools import tool as crewai_tool
+except ImportError:
+    def crewai_tool(name_or_func=None):
+        """Fallback @tool decorator when CrewAI is unavailable."""
+        def decorator(func):
+            func.tool_name = name_or_func if isinstance(name_or_func, str) else func.__name__
+            return func
+        if callable(name_or_func):
+            return decorator(name_or_func)
+        return decorator
 
 logger = logging.getLogger(__name__)
 
@@ -329,3 +348,97 @@ class ScenarioAgent:
                 if v != getattr(EXPECTED_SCENARIO, k, None)
             },
         }
+
+
+# =============================================================================
+# CrewAI @tool Functions for Scenario Manager
+# =============================================================================
+
+# Singleton instance for tool functions to delegate to
+_scenario_agent_instance = ScenarioAgent()
+
+
+@crewai_tool("create_custom_scenario")
+def create_custom_scenario(name: str, profile: str = "expected", overrides_json: str = "{}") -> dict:
+    """Create a custom scenario from a base profile (conservative/expected/aggressive)
+    with parameter overrides. overrides_json is a JSON object of parameter overrides."""
+    try:
+        overrides = json.loads(overrides_json) if overrides_json != "{}" else None
+    except json.JSONDecodeError:
+        overrides = None
+
+    scenario = _scenario_agent_instance.create_custom_scenario(
+        name=name, base=profile, overrides=overrides
+    )
+    return scenario.to_dict()
+
+
+@crewai_tool("compare_scenarios")
+def compare_scenarios(scenario_results_json: str) -> dict:
+    """Compare multiple scenario results side by side.
+    scenario_results_json is a JSON object mapping scenario names to their KPI results."""
+    try:
+        results = json.loads(scenario_results_json)
+    except json.JSONDecodeError:
+        return {"error": "Invalid JSON"}
+
+    return _scenario_agent_instance.compare_scenarios(results)
+
+
+@crewai_tool("get_affected_kpis")
+def get_affected_kpis(base_params_json: str, new_params_json: str) -> dict:
+    """Determine which KPIs need re-computation when scenario parameters change.
+    Both inputs are JSON objects of parameter key-value pairs."""
+    try:
+        base = json.loads(base_params_json)
+        new = json.loads(new_params_json)
+    except json.JSONDecodeError:
+        return {"error": "Invalid JSON"}
+
+    affected = _scenario_agent_instance.get_affected_kpis(base, new)
+    return {"affected_kpis": affected, "count": len(affected)}
+
+
+@crewai_tool("generate_reconciliation_plan")
+def generate_reconciliation_plan_tool(scenario_name: str = "expected") -> dict:
+    """Generate a reconciliation plan to avoid double-counting savings across KPIs
+    for a given scenario profile."""
+    bases = {
+        "conservative": CONSERVATIVE_SCENARIO,
+        "expected": EXPECTED_SCENARIO,
+        "aggressive": AGGRESSIVE_SCENARIO,
+    }
+    params = copy.deepcopy(bases.get(scenario_name, EXPECTED_SCENARIO))
+    return _scenario_agent_instance.generate_reconciliation_plan(params)
+
+
+# =============================================================================
+# CrewAI Scenario Manager Agent
+# =============================================================================
+
+_SCENARIO_MANAGER_CONFIG = dict(
+    role="Scenario Planning Coordinator",
+    goal="Coordinate what-if scenario analysis by creating scenarios, determining affected KPIs, "
+         "comparing results, and generating reconciliation plans to avoid double-counting.",
+    backstory="You are a strategic planning coordinator who manages scenario analysis workflows. "
+              "You understand how parameter changes cascade through KPI calculations and ensure "
+              "that scenario comparisons are fair, reconciled, and actionable.",
+)
+
+SCENARIO_MANAGER_TOOLS = [
+    create_custom_scenario,
+    compare_scenarios,
+    get_affected_kpis,
+    generate_reconciliation_plan_tool,
+]
+
+
+def get_scenario_manager_agent():
+    """Lazy factory for the scenario manager CrewAI agent."""
+    try:
+        return Agent(**_SCENARIO_MANAGER_CONFIG, tools=SCENARIO_MANAGER_TOOLS, verbose=True)
+    except Exception:
+        try:
+            return Agent(**_SCENARIO_MANAGER_CONFIG, tools=SCENARIO_MANAGER_TOOLS)
+        except Exception:
+            return Agent(**_SCENARIO_MANAGER_CONFIG)

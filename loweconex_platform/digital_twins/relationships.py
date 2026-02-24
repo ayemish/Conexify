@@ -193,6 +193,55 @@ class RelationshipGraph:
 
         return deps
 
+    # -----------------------------------------------------------------
+    # New traversal helpers for broadened schema
+    # -----------------------------------------------------------------
+
+    def get_controlled_assets(self, controller_id: str) -> List[str]:
+        """Get all asset IDs controlled by a controller (CONTROLLED_BY incoming)."""
+        return [
+            r.source_id
+            for r in self.get_incoming(controller_id, RelationshipType.CONTROLLED_BY)
+        ]
+
+    def get_asset_controller(self, asset_id: str) -> Optional[str]:
+        """Get the controller ID for an asset, if any."""
+        rels = self.get_outgoing(asset_id, RelationshipType.CONTROLLED_BY)
+        return rels[0].target_id if rels else None
+
+    def get_asset_open_work_orders(self, asset_id: str) -> List[str]:
+        """Get IDs of open work orders linked to an asset."""
+        return [
+            r.target_id
+            for r in self.get_outgoing(asset_id, RelationshipType.HAS_OPEN_WO)
+        ]
+
+    def get_asset_components(self, asset_id: str) -> List[str]:
+        """Get component IDs contained within an asset."""
+        return [
+            r.target_id
+            for r in self.get_outgoing(asset_id, RelationshipType.CONTAINS_COMPONENT)
+        ]
+
+    def get_zone_assets(self, zone_id: str) -> List[str]:
+        """Get all asset IDs located in a zone."""
+        return [
+            r.source_id
+            for r in self.get_incoming(zone_id, RelationshipType.LOCATED_IN_ZONE)
+        ]
+
+    def get_data_sources_for(self, entity_id: str) -> List[str]:
+        """Get data source IDs feeding an entity."""
+        return [
+            r.source_id
+            for r in self.get_incoming(entity_id, RelationshipType.DATA_SOURCE_FOR)
+        ]
+
+    def get_wo_assignee(self, wo_id: str) -> Optional[str]:
+        """Get the provider/technician ID assigned to a work order."""
+        rels = self.get_outgoing(wo_id, RelationshipType.ASSIGNED_TO)
+        return rels[0].target_id if rels else None
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "edges": [e.to_dict() for e in self._all_edges],

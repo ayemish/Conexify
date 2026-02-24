@@ -360,6 +360,7 @@ class BaseCrewAgent:
     - Inter-agent messaging
     - Domain-specific tools
     - State persistence
+    - Execution observability (token/cost/latency tracking)
     """
     
     def __init__(
@@ -373,6 +374,12 @@ class BaseCrewAgent:
         self.message_bus = message_bus or AgentMessageBus()
         self.beliefs: Dict[str, BeliefState] = {}
         self.action_history: List[Dict[str, Any]] = []
+        
+        # Observability metrics (token/cost/latency tracking — CODEBASE_REVIEW K3)
+        self._obs_total_tokens: int = 0
+        self._obs_total_cost: float = 0.0
+        self._obs_total_latency_ms: float = 0.0
+        self._obs_call_count: int = 0
         
         # Create CrewAI Agent as composition (when available for LLM tasks)
         if CREWAI_AVAILABLE:
@@ -467,6 +474,45 @@ class BaseCrewAgent:
             "inputs": inputs,
             "outputs": outputs,
         })
+    
+    # ── Observability (token/cost/latency tracking) ──────────────────
+    
+    def record_llm_call(
+        self,
+        tokens_used: int = 0,
+        cost_usd: float = 0.0,
+        latency_ms: float = 0.0,
+        model: str = "",
+    ):
+        """Record metrics for a single LLM call for observability dashboards."""
+        self._obs_total_tokens += tokens_used
+        self._obs_total_cost += cost_usd
+        self._obs_total_latency_ms += latency_ms
+        self._obs_call_count += 1
+        logger.debug(
+            "LLM call [%s] model=%s tokens=%d cost=$%.4f latency=%.0fms",
+            self.config.agent_id, model, tokens_used, cost_usd, latency_ms,
+        )
+    
+    def get_observability_metrics(self) -> Dict[str, Any]:
+        """Return accumulated observability metrics for this agent."""
+        return {
+            "agent_id": self.config.agent_id,
+            "role": self.config.role.value if hasattr(self.config.role, "value") else str(self.config.role),
+            "total_tokens": self._obs_total_tokens,
+            "total_cost_usd": round(self._obs_total_cost, 4),
+            "total_latency_ms": round(self._obs_total_latency_ms, 1),
+            "call_count": self._obs_call_count,
+            "avg_latency_ms": round(self._obs_total_latency_ms / max(self._obs_call_count, 1), 1),
+            "avg_tokens_per_call": round(self._obs_total_tokens / max(self._obs_call_count, 1)),
+        }
+    
+    def reset_observability_metrics(self):
+        """Reset accumulated metrics (e.g., at start of a new crew run)."""
+        self._obs_total_tokens = 0
+        self._obs_total_cost = 0.0
+        self._obs_total_latency_ms = 0.0
+        self._obs_call_count = 0
     
     def save_state(self, path: Optional[str] = None):
         """Persist agent state"""

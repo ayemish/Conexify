@@ -5,6 +5,7 @@ Manages human-in-the-loop approval workflow for autopilot runs.
 """
 
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, List, Optional
@@ -77,8 +78,15 @@ class ApprovalManager:
     - Escalation on rejection
     """
     
-    def __init__(self, session_factory: Callable[[], Session]):
+    def __init__(
+        self,
+        session_factory: Callable[[], Session],
+        notification_connector: Optional[Any] = None,
+        dev_mode: bool = True,
+    ):
         self.session_factory = session_factory
+        self.notification_connector = notification_connector
+        self.dev_mode = dev_mode
     
     def requires_approval(
         self,
@@ -372,15 +380,69 @@ class ApprovalManager:
     def _notify_approvers(self, request: ApprovalRequest, approval_id: str):
         """
         Send notifications to approvers.
-        
-        TODO: Implement actual notification (email, SMS, push)
         """
-        logger.info(
-            f"[NOTIFICATION] Approval required for run {request.run_id} "
-            f"(approval_id={approval_id}, risk_tier={request.risk_tier.value})"
-        )
-        
-        # In production, this would:
-        # 1. Look up approvers based on tenant/site/role
-        # 2. Send notifications via configured channels
-        # 3. Create notification records for tracking
+        recipients_env = os.getenv("PDM_APPROVAL_RECIPIENTS", "")
+        recipients = [r.strip() for r in recipients_env.split(",") if r.strip()]
+        if not recipients:
+            recipients = [f"ops@{request.tenant_id or 'default'}.local"]
+
+        payload = {
+            "approval_id": approval_id,
+            "run_id": request.run_id,
+            "risk_tier": request.risk_tier.value,
+            "tenant_id": request.tenant_id,
+            "step_id": request.step_id,
+            "expires_in_minutes": request.expires_in_minutes,
+        }
+
+        connector = self.notification_connector
+        if connector is None:
+            if self.dev_mode:
+                logger.info(
+                    "Approval notification no-op in dev_mode: %s",
+                    payload,
+                )
+                return
+            raise RuntimeError(
+                "Approval notification connector is required when dev_mode is disabled."
+            )
+
+        try:
+            if hasattr(connector, "send_approval_request"):
+                response = connector.send_approval_request(
+                    recipients=recipients,
+                    approval_id=approval_id,
+                    run_id=request.run_id,
+                    proposed_actions=request.proposed_actions,
+                    rationale=request.rationale,
+                    expires_at=datetime.utcnow() + timedelta(minutes=request.expires_in_minutes),
+                )
+            else:
+                response = connector.send(
+                    recipients=recipients,
+                    channel="email",
+                    subject=f"[APPROVAL REQUIRED] {approval_id}",
+                    message=(
+                        f"Approval required for run {request.run_id} "
+                        f"(risk={request.risk_tier.value}, step={request.step_id})."
+                    ),
+                    context=payload,
+                )
+            logger.info(
+                "Approval notification dispatched: approval_id=%s run_id=%s recipients=%s success=%s",
+                approval_id,
+                request.run_id,
+                recipients,
+                getattr(response, "success", True),
+            )
+        except Exception as exc:
+            if self.dev_mode:
+                logger.warning(
+                    "Approval notification failed in dev_mode, continuing: approval_id=%s error=%s",
+                    approval_id,
+                    exc,
+                )
+                return
+            raise RuntimeError(
+                f"Approval notification failed for approval_id={approval_id}: {exc}"
+            ) from exc

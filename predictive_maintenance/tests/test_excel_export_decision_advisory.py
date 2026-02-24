@@ -1,6 +1,10 @@
 import io
 
-from openpyxl import load_workbook
+import pytest
+
+pytestmark = pytest.mark.optional_export
+openpyxl = pytest.importorskip("openpyxl")
+load_workbook = openpyxl.load_workbook
 
 from predictive_maintenance.services.kpi.excel_export import (
     ExportRequest,

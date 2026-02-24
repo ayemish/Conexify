@@ -271,6 +271,23 @@ class MetricsCollector:
             "Total feedback records",
             ["outcome"]
         )
+
+        # Degraded-mode / partial computation metrics
+        self._metrics["upload_rows_dropped"] = self._create_counter(
+            "upload_rows_dropped_total",
+            "Rows dropped during upload parsing/normalization",
+            ["site_id", "reason"]
+        )
+        self._metrics["kpi_computations_skipped"] = self._create_counter(
+            "kpi_computations_skipped_total",
+            "KPI computations skipped due to partial failures",
+            ["site_id", "kpi_name", "reason"]
+        )
+        self._metrics["kpi_enrichment_failures"] = self._create_counter(
+            "kpi_enrichment_failures_total",
+            "KPI enrichment failures that triggered degraded mode",
+            ["site_id", "enrichment_type"]
+        )
         
         # System health metrics
         self._metrics["system_uptime"] = self._create_gauge(
@@ -343,6 +360,28 @@ class MetricsCollector:
     def record_feedback(self, outcome: str):
         """Record feedback"""
         self._metrics["feedback_received"].labels(outcome=outcome).inc()
+
+    def record_upload_rows_dropped(self, site_id: str, reason: str, count: int = 1):
+        """Record dropped rows for upload/ingestion quality tracking."""
+        self._metrics["upload_rows_dropped"].labels(
+            site_id=site_id,
+            reason=reason,
+        ).inc(count)
+
+    def record_kpi_computation_skipped(self, site_id: str, kpi_name: str, reason: str, count: int = 1):
+        """Record skipped KPI computations due to non-fatal errors."""
+        self._metrics["kpi_computations_skipped"].labels(
+            site_id=site_id,
+            kpi_name=kpi_name,
+            reason=reason,
+        ).inc(count)
+
+    def record_kpi_enrichment_failure(self, site_id: str, enrichment_type: str, count: int = 1):
+        """Record enrichment failures that resulted in degraded output."""
+        self._metrics["kpi_enrichment_failures"].labels(
+            site_id=site_id,
+            enrichment_type=enrichment_type,
+        ).inc(count)
     
     def get_metrics_text(self) -> str:
         """Get metrics in Prometheus text format"""

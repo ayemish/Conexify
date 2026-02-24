@@ -29,12 +29,20 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from loweconex_platform.digital_twins.models import (
+    AgentAction,
     AssetTwin,
     AssetType,
+    ComponentTwin,
+    ControllerTwin,
+    DataSourceRegistration,
     EstateTwin,
     LocationTwin,
+    SensorPointTwin,
+    ServiceProviderTwin,
+    TechnicianProfile,
     TwinRelationship,
     RelationshipType,
+    WorkOrderTwin,
 )
 from loweconex_platform.digital_twins.store import (
     OperationalEvent,
@@ -124,12 +132,97 @@ if _DB_AVAILABLE:
         quality = Column(Float, default=1.0)
         unit = Column(String(30), default="")
 
+    class TwinControllerModel(_Base):
+        """Persisted ControllerTwin."""
+        __tablename__ = "pdm_twin_controllers"
+        __table_args__ = {"extend_existing": True}
+        controller_id = Column(String(100), primary_key=True)
+        location_id = Column(String(100), nullable=False, index=True)
+        company_id = Column(String(100), nullable=False, index=True)
+        twin_json = Column(JSONB, nullable=False)
+        updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    class TwinSensorPointModel(_Base):
+        """Persisted SensorPointTwin."""
+        __tablename__ = "pdm_twin_sensor_points"
+        __table_args__ = {"extend_existing": True}
+        point_id = Column(String(200), primary_key=True)
+        asset_id = Column(String(100), nullable=False, index=True)
+        twin_json = Column(JSONB, nullable=False)
+        updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    class TwinComponentModel(_Base):
+        """Persisted ComponentTwin."""
+        __tablename__ = "pdm_twin_components"
+        __table_args__ = {"extend_existing": True}
+        component_id = Column(String(100), primary_key=True)
+        parent_asset_id = Column(String(100), nullable=False, index=True)
+        twin_json = Column(JSONB, nullable=False)
+        updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    class TwinDataSourceModel(_Base):
+        """Persisted DataSourceRegistration."""
+        __tablename__ = "pdm_twin_data_sources"
+        __table_args__ = {"extend_existing": True}
+        source_id = Column(String(100), primary_key=True)
+        company_id = Column(String(100), nullable=False, index=True)
+        location_id = Column(String(100), nullable=True, index=True)
+        twin_json = Column(JSONB, nullable=False)
+        updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    class TwinWorkOrderModel(_Base):
+        """Persisted WorkOrderTwin."""
+        __tablename__ = "pdm_twin_work_orders"
+        __table_args__ = {"extend_existing": True}
+        wo_id = Column(String(100), primary_key=True)
+        asset_id = Column(String(100), nullable=False, index=True)
+        location_id = Column(String(100), nullable=False, index=True)
+        company_id = Column(String(100), nullable=False, index=True)
+        twin_json = Column(JSONB, nullable=False)
+        updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    class TwinServiceProviderModel(_Base):
+        """Persisted ServiceProviderTwin."""
+        __tablename__ = "pdm_twin_service_providers"
+        __table_args__ = {"extend_existing": True}
+        provider_id = Column(String(100), primary_key=True)
+        company_id = Column(String(100), nullable=False, index=True)
+        twin_json = Column(JSONB, nullable=False)
+        updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    class TwinTechnicianModel(_Base):
+        """Persisted TechnicianProfile."""
+        __tablename__ = "pdm_twin_technicians"
+        __table_args__ = {"extend_existing": True}
+        technician_id = Column(String(100), primary_key=True)
+        provider_id = Column(String(100), nullable=False, index=True)
+        twin_json = Column(JSONB, nullable=False)
+        updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    class TwinAgentActionModel(_Base):
+        """Persisted AgentAction."""
+        __tablename__ = "pdm_twin_agent_actions"
+        __table_args__ = {"extend_existing": True}
+        action_id = Column(String(100), primary_key=True)
+        company_id = Column(String(100), nullable=False, index=True)
+        asset_id = Column(String(100), nullable=True, index=True)
+        twin_json = Column(JSONB, nullable=False)
+        created_at = Column(DateTime, default=datetime.utcnow)
+
     _ORM_MODELS = {
         "asset_sidecar": TwinAssetSidecarModel,
         "location": TwinLocationModel,
         "estate": TwinEstateModel,
         "relationship": TwinRelationshipModel,
         "timeseries": TwinTimeseriesModel,
+        "controller": TwinControllerModel,
+        "sensor_point": TwinSensorPointModel,
+        "component": TwinComponentModel,
+        "data_source": TwinDataSourceModel,
+        "work_order": TwinWorkOrderModel,
+        "service_provider": TwinServiceProviderModel,
+        "technician": TwinTechnicianModel,
+        "agent_action": TwinAgentActionModel,
     }
 
 
@@ -145,9 +238,28 @@ class PostgresTwinStore(TwinStore):
     def __init__(self, hydrate: bool = True):
         super().__init__()
         self._db_available = _DB_AVAILABLE
+        self.degraded_mode: bool = False
+        self.hydration_warnings: List[Dict[str, Any]] = []
         self._ensure_tables()
         if hydrate and self._db_available:
             self._hydrate_from_db()
+
+    def _record_nonfatal_hydration_error(
+        self,
+        code: str,
+        message: str,
+        context: Dict[str, Any],
+        error: Optional[Exception] = None,
+    ) -> None:
+        warning = {
+            "code": code,
+            "message": message,
+            "context": context,
+            "error": str(error) if error else None,
+        }
+        self.hydration_warnings.append(warning)
+        self.degraded_mode = True
+        logger.warning("%s | context=%s | error=%s", message, context, error)
 
     # ── Schema bootstrap ────────────────────────────────────────────
 
@@ -173,9 +285,22 @@ class PostgresTwinStore(TwinStore):
         r_count = self._hydrate_relationships()
         ts_count = self._hydrate_timeseries()
         ev_count = self._hydrate_events()
+        c_count = self._hydrate_controllers()
+        sp_count = self._hydrate_sensor_points()
+        comp_count = self._hydrate_components()
+        ds_count = self._hydrate_data_sources()
+        wo_count = self._hydrate_work_orders()
+        prov_count = self._hydrate_service_providers()
+        tech_count = self._hydrate_technicians()
+        aa_count = self._hydrate_agent_actions()
         logger.info(
-            "PostgresTwinStore hydrated: %d assets, %d locations, %d estates, %d relationships, %d timeseries points, %d events",
+            "PostgresTwinStore hydrated: %d assets, %d locations, %d estates, "
+            "%d relationships, %d ts points, %d events, %d controllers, "
+            "%d sensor_points, %d components, %d data_sources, %d work_orders, "
+            "%d providers, %d technicians, %d agent_actions",
             a_count, l_count, e_count, r_count, ts_count, ev_count,
+            c_count, sp_count, comp_count, ds_count, wo_count,
+            prov_count, tech_count, aa_count,
         )
 
     def _hydrate_assets(self) -> int:
@@ -189,8 +314,13 @@ class PostgresTwinStore(TwinStore):
                         twin = AssetTwin.from_dict(data)
                         super().upsert_asset(twin)
                         count += 1
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        self._record_nonfatal_hydration_error(
+                            "ASSET_HYDRATE_ROW_FAILED",
+                            "Failed hydrating asset sidecar row; row skipped.",
+                            {"asset_id": getattr(row, "asset_id", "")},
+                            exc,
+                        )
         except Exception as e:
             logger.debug("Asset hydration: %s", e)
             # Fallback: hydrate from pdm_assets table
@@ -209,10 +339,20 @@ class PostgresTwinStore(TwinStore):
                             )
                             super().upsert_asset(twin)
                             count += 1
-                        except Exception:
-                            pass
-            except Exception:
-                pass
+                        except Exception as exc:
+                            self._record_nonfatal_hydration_error(
+                                "ASSET_FALLBACK_ROW_FAILED",
+                                "Failed hydrating fallback asset row; row skipped.",
+                                {"asset_id": getattr(row, "asset_id", "")},
+                                exc,
+                            )
+            except Exception as exc:
+                self._record_nonfatal_hydration_error(
+                    "ASSET_FALLBACK_QUERY_FAILED",
+                    "Fallback asset hydration query failed.",
+                    {"asset_id": ""},
+                    exc,
+                )
         return count
 
     def _hydrate_locations(self) -> int:
@@ -226,8 +366,13 @@ class PostgresTwinStore(TwinStore):
                         twin = LocationTwin.from_dict(data)
                         super().upsert_location(twin)
                         count += 1
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        self._record_nonfatal_hydration_error(
+                            "LOCATION_HYDRATE_ROW_FAILED",
+                            "Failed hydrating location row; row skipped.",
+                            {"location_id": getattr(row, "location_id", "")},
+                            exc,
+                        )
         except Exception as e:
             logger.debug("Location hydration: %s", e)
         return count
@@ -243,8 +388,13 @@ class PostgresTwinStore(TwinStore):
                         twin = EstateTwin.from_dict(data)
                         super().upsert_estate(twin)
                         count += 1
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        self._record_nonfatal_hydration_error(
+                            "ESTATE_HYDRATE_ROW_FAILED",
+                            "Failed hydrating estate row; row skipped.",
+                            {"company_id": getattr(row, "company_id", "")},
+                            exc,
+                        )
         except Exception as e:
             logger.debug("Estate hydration: %s", e)
         return count
@@ -264,8 +414,16 @@ class PostgresTwinStore(TwinStore):
                         )
                         super().add_relationship(rel)
                         count += 1
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        self._record_nonfatal_hydration_error(
+                            "RELATIONSHIP_HYDRATE_ROW_FAILED",
+                            "Failed hydrating relationship row; row skipped.",
+                            {
+                                "source_id": getattr(row, "source_id", ""),
+                                "target_id": getattr(row, "target_id", ""),
+                            },
+                            exc,
+                        )
         except Exception as e:
             logger.debug("Relationship hydration: %s", e)
         return count
@@ -331,6 +489,182 @@ class PostgresTwinStore(TwinStore):
                     count += 1
         except Exception as e:
             logger.debug("Event hydration: %s", e)
+        return count
+
+    def _hydrate_controllers(self) -> int:
+        count = 0
+        try:
+            with get_session() as session:
+                rows = session.query(_ORM_MODELS["controller"]).all()
+                for row in rows:
+                    try:
+                        data = row.twin_json if isinstance(row.twin_json, dict) else json.loads(row.twin_json)
+                        twin = ControllerTwin.from_dict(data)
+                        super().upsert_controller(twin)
+                        count += 1
+                    except Exception as exc:
+                        self._record_nonfatal_hydration_error(
+                            "CONTROLLER_HYDRATE_ROW_FAILED",
+                            "Failed hydrating controller row; row skipped.",
+                            {"controller_id": getattr(row, "controller_id", "")},
+                            exc,
+                        )
+        except Exception as e:
+            logger.debug("Controller hydration: %s", e)
+        return count
+
+    def _hydrate_sensor_points(self) -> int:
+        count = 0
+        try:
+            with get_session() as session:
+                rows = session.query(_ORM_MODELS["sensor_point"]).all()
+                for row in rows:
+                    try:
+                        data = row.twin_json if isinstance(row.twin_json, dict) else json.loads(row.twin_json)
+                        twin = SensorPointTwin.from_dict(data)
+                        super().upsert_sensor_point(twin)
+                        count += 1
+                    except Exception as exc:
+                        self._record_nonfatal_hydration_error(
+                            "SENSOR_POINT_HYDRATE_ROW_FAILED",
+                            "Failed hydrating sensor point row; row skipped.",
+                            {"asset_id": getattr(row, "asset_id", "")},
+                            exc,
+                        )
+        except Exception as e:
+            logger.debug("SensorPoint hydration: %s", e)
+        return count
+
+    def _hydrate_components(self) -> int:
+        count = 0
+        try:
+            with get_session() as session:
+                rows = session.query(_ORM_MODELS["component"]).all()
+                for row in rows:
+                    try:
+                        data = row.twin_json if isinstance(row.twin_json, dict) else json.loads(row.twin_json)
+                        twin = ComponentTwin.from_dict(data)
+                        super().upsert_component(twin)
+                        count += 1
+                    except Exception as exc:
+                        self._record_nonfatal_hydration_error(
+                            "COMPONENT_HYDRATE_ROW_FAILED",
+                            "Failed hydrating component row; row skipped.",
+                            {"parent_asset_id": getattr(row, "parent_asset_id", "")},
+                            exc,
+                        )
+        except Exception as e:
+            logger.debug("Component hydration: %s", e)
+        return count
+
+    def _hydrate_data_sources(self) -> int:
+        count = 0
+        try:
+            with get_session() as session:
+                rows = session.query(_ORM_MODELS["data_source"]).all()
+                for row in rows:
+                    try:
+                        data = row.twin_json if isinstance(row.twin_json, dict) else json.loads(row.twin_json)
+                        twin = DataSourceRegistration.from_dict(data)
+                        super().upsert_data_source(twin)
+                        count += 1
+                    except Exception as exc:
+                        self._record_nonfatal_hydration_error(
+                            "DATA_SOURCE_HYDRATE_ROW_FAILED",
+                            "Failed hydrating data source row; row skipped.",
+                            {"source_id": getattr(row, "source_id", "")},
+                            exc,
+                        )
+        except Exception as e:
+            logger.debug("DataSource hydration: %s", e)
+        return count
+
+    def _hydrate_work_orders(self) -> int:
+        count = 0
+        try:
+            with get_session() as session:
+                rows = session.query(_ORM_MODELS["work_order"]).all()
+                for row in rows:
+                    try:
+                        data = row.twin_json if isinstance(row.twin_json, dict) else json.loads(row.twin_json)
+                        twin = WorkOrderTwin.from_dict(data)
+                        super().upsert_work_order(twin)
+                        count += 1
+                    except Exception as exc:
+                        self._record_nonfatal_hydration_error(
+                            "WORK_ORDER_HYDRATE_ROW_FAILED",
+                            "Failed hydrating work order row; row skipped.",
+                            {"asset_id": getattr(row, "asset_id", "")},
+                            exc,
+                        )
+        except Exception as e:
+            logger.debug("WorkOrder hydration: %s", e)
+        return count
+
+    def _hydrate_service_providers(self) -> int:
+        count = 0
+        try:
+            with get_session() as session:
+                rows = session.query(_ORM_MODELS["service_provider"]).all()
+                for row in rows:
+                    try:
+                        data = row.twin_json if isinstance(row.twin_json, dict) else json.loads(row.twin_json)
+                        twin = ServiceProviderTwin.from_dict(data)
+                        super().upsert_service_provider(twin)
+                        count += 1
+                    except Exception as exc:
+                        self._record_nonfatal_hydration_error(
+                            "PROVIDER_HYDRATE_ROW_FAILED",
+                            "Failed hydrating service provider row; row skipped.",
+                            {"provider_id": getattr(row, "provider_id", "")},
+                            exc,
+                        )
+        except Exception as e:
+            logger.debug("ServiceProvider hydration: %s", e)
+        return count
+
+    def _hydrate_technicians(self) -> int:
+        count = 0
+        try:
+            with get_session() as session:
+                rows = session.query(_ORM_MODELS["technician"]).all()
+                for row in rows:
+                    try:
+                        data = row.twin_json if isinstance(row.twin_json, dict) else json.loads(row.twin_json)
+                        twin = TechnicianProfile.from_dict(data)
+                        super().upsert_technician(twin)
+                        count += 1
+                    except Exception as exc:
+                        self._record_nonfatal_hydration_error(
+                            "TECHNICIAN_HYDRATE_ROW_FAILED",
+                            "Failed hydrating technician row; row skipped.",
+                            {"technician_id": getattr(row, "technician_id", "")},
+                            exc,
+                        )
+        except Exception as e:
+            logger.debug("Technician hydration: %s", e)
+        return count
+
+    def _hydrate_agent_actions(self) -> int:
+        count = 0
+        try:
+            with get_session() as session:
+                rows = session.query(_ORM_MODELS["agent_action"]).all()
+                for row in rows:
+                    try:
+                        data = row.twin_json if isinstance(row.twin_json, dict) else json.loads(row.twin_json)
+                        action = AgentAction.from_dict(data)
+                        super().store_agent_action(action)
+                        count += 1
+                    except Exception as exc:
+                        self._record_nonfatal_hydration_error(
+                            "AGENT_ACTION_HYDRATE_ROW_FAILED",
+                            "Failed hydrating agent action row; row skipped.",
+                            {"asset_id": getattr(row, "asset_id", "")},
+                            exc,
+                        )
+        except Exception as e:
+            logger.debug("AgentAction hydration: %s", e)
         return count
 
     # ── Write-through overrides ─────────────────────────────────────
@@ -502,6 +836,62 @@ class PostgresTwinStore(TwinStore):
         except Exception as e:
             logger.debug("Timeseries persist failed for %s: %s", point_id, e)
 
+    def upsert_controller(self, controller: ControllerTwin) -> ControllerTwin:
+        result = super().upsert_controller(controller)
+        if self._db_available:
+            self._persist_json_twin("controller", "controller_id", controller.controller_id, controller.to_dict(),
+                                   extra={"location_id": controller.location_id, "company_id": controller.company_id})
+        return result
+
+    def upsert_sensor_point(self, point: SensorPointTwin) -> SensorPointTwin:
+        result = super().upsert_sensor_point(point)
+        if self._db_available:
+            self._persist_json_twin("sensor_point", "point_id", point.point_id, point.to_dict(),
+                                   extra={"asset_id": point.asset_id})
+        return result
+
+    def upsert_component(self, component: ComponentTwin) -> ComponentTwin:
+        result = super().upsert_component(component)
+        if self._db_available:
+            self._persist_json_twin("component", "component_id", component.component_id, component.to_dict(),
+                                   extra={"parent_asset_id": component.parent_asset_id})
+        return result
+
+    def upsert_data_source(self, source: DataSourceRegistration) -> DataSourceRegistration:
+        result = super().upsert_data_source(source)
+        if self._db_available:
+            self._persist_json_twin("data_source", "source_id", source.source_id, source.to_dict(),
+                                   extra={"company_id": source.company_id, "location_id": source.location_id})
+        return result
+
+    def upsert_work_order(self, wo: WorkOrderTwin) -> WorkOrderTwin:
+        result = super().upsert_work_order(wo)
+        if self._db_available:
+            self._persist_json_twin("work_order", "wo_id", wo.wo_id, wo.to_dict(),
+                                   extra={"asset_id": wo.asset_id, "location_id": wo.location_id, "company_id": wo.company_id})
+        return result
+
+    def upsert_service_provider(self, provider: ServiceProviderTwin) -> ServiceProviderTwin:
+        result = super().upsert_service_provider(provider)
+        if self._db_available:
+            self._persist_json_twin("service_provider", "provider_id", provider.provider_id, provider.to_dict(),
+                                   extra={"company_id": provider.company_id})
+        return result
+
+    def upsert_technician(self, tech: TechnicianProfile) -> TechnicianProfile:
+        result = super().upsert_technician(tech)
+        if self._db_available:
+            self._persist_json_twin("technician", "technician_id", tech.technician_id, tech.to_dict(),
+                                   extra={"provider_id": tech.provider_id})
+        return result
+
+    def store_agent_action(self, action: AgentAction) -> AgentAction:
+        result = super().store_agent_action(action)
+        if self._db_available:
+            self._persist_json_twin("agent_action", "action_id", action.action_id, action.to_dict(),
+                                   extra={"company_id": action.company_id, "asset_id": action.asset_id})
+        return result
+
     def _deactivate_asset_db(self, asset_id: str):
         try:
             with get_session() as session:
@@ -518,6 +908,30 @@ class PostgresTwinStore(TwinStore):
                 session.commit()
         except Exception as e:
             logger.debug("Asset deactivate failed for %s: %s", asset_id, e)
+
+    def _persist_json_twin(self, model_key: str, pk_field: str, pk_value: str,
+                           twin_data: Dict[str, Any], extra: Optional[Dict[str, Any]] = None):
+        """Generic JSON sidecar persist for new twin entity types."""
+        try:
+            with get_session() as session:
+                Model = _ORM_MODELS[model_key]
+                existing = session.query(Model).filter(getattr(Model, pk_field) == pk_value).first()
+                if existing:
+                    existing.twin_json = twin_data
+                    if hasattr(existing, "updated_at"):
+                        existing.updated_at = datetime.utcnow()
+                    if extra:
+                        for k, v in extra.items():
+                            if hasattr(existing, k):
+                                setattr(existing, k, v)
+                else:
+                    kwargs = {pk_field: pk_value, "twin_json": twin_data}
+                    if extra:
+                        kwargs.update(extra)
+                    session.add(Model(**kwargs))
+                session.commit()
+        except Exception as e:
+            logger.debug("%s persist failed for %s: %s", model_key, pk_value, e)
 
     def _persist_event(self, event: OperationalEvent):
         """Persist an operational event as an alert in the PdM persistence layer."""

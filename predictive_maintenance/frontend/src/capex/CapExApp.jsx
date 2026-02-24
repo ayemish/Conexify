@@ -4,7 +4,8 @@ import {
   RefreshCw, Settings, BarChart3, Target, Zap, Wrench, Shield,
   ChevronDown, ChevronUp, Check, X, Clock, Eye, Upload, FileJson, Database, Loader2
 } from 'lucide-react';
-import { generateCompleteStoreData, generateReplacementOptions } from './data/sampleData.js';
+import { generateCompleteStoreData, generateSampleAssets, generateReplacementOptions, generateSampleUtilityRate, generateSampleEconomicAssumptions } from './data/sampleData.js';
+import { useAppContext } from '../context/AppContext';
 import { runCapexAnalysis, runCapexAnalysisAsync } from './engine/capexEngine.js';
 import { getDataSourceStatus } from './data/externalDataLoader.js';
 import { exportToExcel, exportToCsv } from './utils/exportUtils.js';
@@ -289,9 +290,48 @@ const AssetRow = ({ item, onExpand, isExpanded }) => {
   );
 };
 
+// Build CapEx store data from platform availableSites so the dropdown matches every other page
+function buildStoreDataFromSites(sites) {
+  const climateZones = ['5A', '4A', '3A', '2A', '5B'];
+  const storeTypes = ['Grocery', 'Big Box', 'Warehouse', 'Grocery', 'Grocery'];
+  const stores = sites.map((site, i) => ({
+    storeId: site.id,
+    name: site.name || site.id,
+    address: site.address || '',
+    lat: 41.88,
+    lon: -87.63,
+    region: 'Midwest',
+    climateZone: climateZones[i % climateZones.length],
+    areaSqft: 50000,
+    storeType: storeTypes[i % storeTypes.length],
+    utilityRateId: `rate-${site.id}`,
+  }));
+
+  const allAssets = [];
+  const allOptions = [];
+  const utilityRates = [];
+  const economicAssumptions = [];
+
+  stores.forEach(store => {
+    const assets = generateSampleAssets(store.storeId, store.storeType);
+    allAssets.push(...assets);
+    assets.forEach(asset => {
+      allOptions.push(...generateReplacementOptions(asset));
+    });
+    utilityRates.push(generateSampleUtilityRate(store.storeId, store.climateZone));
+    economicAssumptions.push(generateSampleEconomicAssumptions(store.storeId));
+  });
+
+  return { stores, assets: allAssets, replacementOptions: allOptions, utilityRates, economicAssumptions };
+}
+
 function App() {
-  const [sampleData, setSampleData] = useState(null);
-  const [selectedStoreId, setSelectedStoreId] = useState(null);
+  const { availableSites } = useAppContext();
+
+  // Immediately initialize with sample data so calculator is always visible
+  const [initialData] = useState(() => generateCompleteStoreData(5));
+  const [sampleData, setSampleData] = useState(initialData);
+  const [selectedStoreId, setSelectedStoreId] = useState(initialData.stores[0].storeId);
   const [budget, setBudget] = useState(200000);
   const [objective, setObjective] = useState('max_expected_npv');
   const [analysisResult, setAnalysisResult] = useState(null);
@@ -305,12 +345,25 @@ function App() {
   const [dataSourceStatus, setDataSourceStatus] = useState(null);
   const [platformLoading, setPlatformLoading] = useState(false);
   const fileInputRef = useRef(null);
-  
-  // Auto-load platform data on mount
+
+  // Re-seed store data when platform availableSites change (so dropdown matches other pages)
+  React.useEffect(() => {
+    if (availableSites && availableSites.length > 0) {
+      const data = buildStoreDataFromSites(availableSites);
+      setSampleData(data);
+      setSelectedStoreId(prev => {
+        // Keep current selection if it's still valid, otherwise pick first
+        if (data.stores.some(s => s.storeId === prev)) return prev;
+        return data.stores[0].storeId;
+      });
+      setAnalysisResult(null);
+    }
+  }, [availableSites]);
+
+  // Fetch data source status on mount
   React.useEffect(() => {
     getDataSourceStatus().then(setDataSourceStatus).catch(() => {});
-    loadFromPlatform();
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, []);
   
   const loadSampleData = useCallback(() => {
     const data = generateCompleteStoreData(5);
@@ -358,8 +411,12 @@ function App() {
         woAssets: Object.keys(normalizedData.maintenanceHistory).length,
       });
     } catch (err) {
-      console.error('[CapEx] Platform load error:', err);
-      setUploadError(`Platform data load failed: ${err.message}`);
+      console.warn('[CapEx] Platform load failed, falling back to sample data:', err.message);
+      // Auto-load sample data so the calculator is always visible
+      const data = generateCompleteStoreData(5);
+      setSampleData(data);
+      setSelectedStoreId(data.stores[0].storeId);
+      setAnalysisResult(null);
     } finally {
       setPlatformLoading(false);
     }
@@ -577,122 +634,6 @@ function App() {
       </header>
       
       <main className="max-w-7xl mx-auto px-4 py-6">
-        {!sampleData ? (
-          <>
-            <div className="card text-center py-16">
-              <Building2 size={48} className="mx-auto text-gray-400 mb-4" />
-              <h2 className="text-xl font-semibold text-gray-900 mb-2">Welcome to CapEx Generator</h2>
-              <p className="text-gray-500 mb-6 max-w-md mx-auto">
-                Generate optimized capital expenditure plans using telemetry data, peer comparisons, and economic analysis.
-              </p>
-              <div className="flex flex-col items-center gap-4">
-                <div className="flex items-center gap-4">
-                  <button
-                    onClick={loadFromPlatform}
-                    disabled={platformLoading}
-                    className="btn-primary flex items-center gap-2"
-                  >
-                    {platformLoading ? <Loader2 size={16} className="animate-spin" /> : <Database size={16} />}
-                    {platformLoading ? 'Loading…' : 'Load from Platform'}
-                  </button>
-                  <button onClick={loadSampleData} className="btn-secondary">
-                    Load Sample Store Data
-                  </button>
-                  <button 
-                    onClick={() => fileInputRef.current?.click()} 
-                    className="btn-secondary flex items-center gap-2"
-                  >
-                    <Upload size={16} />
-                    Upload JSON File
-                  </button>
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    accept=".json"
-                    onChange={handleFileUpload}
-                    className="hidden"
-                  />
-                </div>
-                <div className="flex items-center gap-4">
-                  <button onClick={executeTests} className="btn-secondary flex items-center gap-2">
-                    <Settings size={16} />
-                    Run Pipeline Tests
-                  </button>
-                </div>
-                {uploadError && (
-                  <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-2 rounded-lg text-sm flex items-center gap-2">
-                    <X size={16} />
-                    {uploadError}
-                  </div>
-                )}
-                <div className="text-xs text-gray-400 mt-2">
-                  <FileJson size={14} className="inline mr-1" />
-                  Sample JSON: <code className="bg-gray-100 px-1 rounded">data/sample_store_dataset.json</code>
-                </div>
-              </div>
-            </div>
-            
-            {showTestPanel && (
-              <div className="card mt-6">
-                <div className="flex items-center justify-between mb-4">
-                  <h2 className="text-lg font-semibold text-gray-900">Pipeline Test Results</h2>
-                  <button onClick={() => setShowTestPanel(false)} className="text-gray-400 hover:text-gray-600">
-                    <X size={20} />
-                  </button>
-                </div>
-                {!testResults ? (
-                  <div className="text-center py-8">
-                    <RefreshCw size={24} className="mx-auto text-primary-500 animate-spin mb-2" />
-                    <p className="text-gray-500">Running tests...</p>
-                  </div>
-                ) : (
-                  <div>
-                    <div className="flex items-center gap-4 mb-4">
-                      <div className="flex items-center gap-2">
-                        <div className="w-4 h-4 rounded-full bg-green-500"></div>
-                        <span className="font-medium">{testResults.passed} Passed</span>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <div className="w-4 h-4 rounded-full bg-red-500"></div>
-                        <span className="font-medium">{testResults.failed} Failed</span>
-                      </div>
-                    </div>
-                    <div className="space-y-2 max-h-96 overflow-y-auto">
-                      {testResults.tests.map((test, i) => (
-                        <div key={i} className={`p-3 rounded-lg ${test.status === 'passed' ? 'bg-green-50 border border-green-200' : 'bg-red-50 border border-red-200'}`}>
-                          <div className="flex items-center gap-2">
-                            {test.status === 'passed' ? <Check size={16} className="text-green-600" /> : <X size={16} className="text-red-600" />}
-                            <span className="font-medium text-sm">{test.name}</span>
-                          </div>
-                          <p className="text-xs text-gray-600 mt-1 ml-6">{test.message}</p>
-                        </div>
-                      ))}
-                    </div>
-                    {testResults.externalData && (
-                      <div className="mt-4 pt-4 border-t border-gray-200">
-                        <h3 className="text-sm font-semibold text-gray-700 mb-2">External Data Integration</h3>
-                        <div className="grid grid-cols-3 gap-4 text-sm">
-                          <div className="bg-gray-50 p-3 rounded">
-                            <p className="text-gray-500">FDD Readings</p>
-                            <p className="font-medium">{testResults.externalData.fddData?.readings?.length || 0}</p>
-                          </div>
-                          <div className="bg-gray-50 p-3 rounded">
-                            <p className="text-gray-500">Faults Detected</p>
-                            <p className="font-medium">{testResults.externalData.fddResult?.faults?.length || 0}</p>
-                          </div>
-                          <div className="bg-gray-50 p-3 rounded">
-                            <p className="text-gray-500">Survival Risk</p>
-                            <p className="font-medium">{testResults.externalData.survivalResult?.riskCategory || 'N/A'}</p>
-                          </div>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            )}
-          </>
-        ) : (
           <>
             <div className="card mb-6">
               <h2 className="text-lg font-semibold text-gray-900 mb-4">Analysis Configuration</h2>
@@ -922,7 +863,6 @@ function App() {
               </>
             )}
           </>
-        )}
       </main>
       
       <footer className="bg-white border-t border-gray-200 mt-8">

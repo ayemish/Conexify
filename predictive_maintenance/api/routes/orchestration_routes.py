@@ -119,6 +119,9 @@ async def get_orchestration_history(
                     for lr in layer_results
                 ]
             entry["layer_summaries"] = layer_summaries
+            entry["data_source"] = "orchestrator_result_history"
+            entry["degraded_mode"] = False
+            entry["warnings"] = []
             serialized.append(entry)
 
         return {"results": serialized, "total": len(orch.result_history)}
@@ -172,6 +175,9 @@ async def _get_kpi_pipeline_runs(site_id: str, limit: int = 50):
                     "crew_statuses": crew_statuses,
                     "collaborative_decision": None,
                     "layer_summaries": {},
+                    "data_source": payload.get("data_source", "kpi_pipeline_history"),
+                    "degraded_mode": bool(payload.get("degraded_mode", False)),
+                    "warnings": payload.get("warnings", []),
                 })
 
             return {"results": results, "total": len(results)}

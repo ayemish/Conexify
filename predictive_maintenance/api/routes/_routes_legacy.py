@@ -6,6 +6,7 @@ REST API endpoints for the Predictive Maintenance system.
 
 import logging
 import uuid
+import warnings
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any
 
@@ -121,43 +122,37 @@ async def liveness_check():
 
 telemetry_router = APIRouter()
 
-# In-memory PDM systems cache (per-asset)
-_pdm_systems: Dict[str, Any] = {}
-_orchestrators: Dict[str, Any] = {}
+from .lifecycle_manager import get_runtime_lifecycle_manager
+
+_lifecycle_mgr = get_runtime_lifecycle_manager()
+
+# Backward-compatible shared cache references.
+_pdm_systems: Dict[str, Any] = _lifecycle_mgr.pdm_systems
+_orchestrators: Dict[str, Any] = _lifecycle_mgr.orchestrators
+_deprecation_warned = {"get_pdm_system": False, "get_orchestrator": False}
+
+
+def _warn_deprecated_helper(name: str, replacement: str):
+    if _deprecation_warned.get(name):
+        return
+    _deprecation_warned[name] = True
+    warnings.warn(
+        f"{name} is deprecated in _routes_legacy; use {replacement} via lifecycle_manager",
+        DeprecationWarning,
+        stacklevel=2,
+    )
 
 
 def get_pdm_system(asset_id: str):
     """Get or create PDM system for an asset"""
-    if asset_id not in _pdm_systems:
-        from ...integration.advanced_system import create_pdm_system
-        from ...config import settings
-        session_factory = None
-        if settings.persistence.enabled:
-            try:
-                from ...persistence.database import get_session_factory
-                session_factory = get_session_factory()
-            except Exception:
-                session_factory = None
-        _pdm_systems[asset_id] = create_pdm_system(
-            asset_id,
-            site_id=settings.site_id,
-            session_factory=session_factory,
-        )
-    return _pdm_systems[asset_id]
+    _warn_deprecated_helper("get_pdm_system", "RuntimeLifecycleManager.get_pdm_system")
+    return _lifecycle_mgr.get_pdm_system(asset_id)
 
 
 def get_orchestrator(site_id: Optional[str] = None):
     """Get or create site-level orchestrator."""
-    from ...config import settings
-    effective_site = site_id or settings.site_id or "default"
-    if effective_site not in _orchestrators:
-        try:
-            from ...agents.orchestrator import PDMModelOrchestrator
-            _orchestrators[effective_site] = PDMModelOrchestrator(site_id=effective_site)
-        except Exception as exc:  # pragma: no cover
-            logger.warning("Orchestrator unavailable for site %s, falling back to kernel path: %s", effective_site, exc)
-            _orchestrators[effective_site] = None
-    return _orchestrators[effective_site]
+    _warn_deprecated_helper("get_orchestrator", "RuntimeLifecycleManager.get_orchestrator")
+    return _lifecycle_mgr.get_orchestrator(site_id)
 
 
 def _to_orchestrator_input(request: TelemetryRequest):

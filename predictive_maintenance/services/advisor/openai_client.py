@@ -10,12 +10,11 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
+from shared.utils import optional_import
+
 logger = logging.getLogger(__name__)
 
-try:
-    import openai as _openai_mod  # type: ignore
-except Exception:
-    _openai_mod = None
+_openai_mod = optional_import("openai", feature_name="advisor_openai_client", logger=logger)
 
 
 @dataclass

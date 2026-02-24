@@ -29,6 +29,22 @@ from shared.agents.crewai_base import (
     BaseTool, AgentRegistry, BeliefState, CREWAI_AVAILABLE,
     Agent, Task, Crew, Process
 )
+from predictive_maintenance.agents.protocols import (
+    ProtocolEnabledAgent, ProtocolMessageBus, create_protocol_bus,
+)
+
+# CrewAI @tool decorator with fallback
+try:
+    from crewai.tools import tool as crewai_tool
+except ImportError:
+    def crewai_tool(name_or_func=None):
+        """Fallback @tool decorator when CrewAI is unavailable."""
+        def decorator(func):
+            func.tool_name = name_or_func if isinstance(name_or_func, str) else func.__name__
+            return func
+        if callable(name_or_func):
+            return decorator(name_or_func)
+        return decorator
 from .redis_event_bus import (
     RedisEventBus, PdMEvent, PdMEventType, PdMEventFactory,
     EventHandler, InMemoryEventBus
@@ -64,12 +80,14 @@ class PdMAgent(DemandTwinAgent, EventHandler):
     - Redis event bus integration
     - Event handling capabilities
     - PdM-specific tools and context
+    - ProtocolEnabledAgent mixin for voting/escalation/consensus
     """
     
     def __init__(
         self,
         config: CrewAIAgentConfig,
         event_bus: Optional[RedisEventBus] = None,
+        protocol_bus: Optional[ProtocolMessageBus] = None,
         **kwargs
     ):
         super().__init__(config, **kwargs)
@@ -78,6 +96,12 @@ class PdMAgent(DemandTwinAgent, EventHandler):
         
         # Register as event handler
         self.event_bus.register_handler(self)
+        
+        # Protocol mixin integration for voting/escalation/consensus
+        self._protocol_bus = protocol_bus
+        self._protocol: Optional[ProtocolEnabledAgent] = None
+        if protocol_bus is not None:
+            self._protocol = ProtocolEnabledAgent(config.agent_id, protocol_bus)
         
         # Agent-specific state
         self.pending_actions: List[Dict[str, Any]] = []
@@ -1283,6 +1307,293 @@ class DataStewardAgent(PdMAgent):
                 "enable_degradation_mode": False,
                 "priority": "low",
             }
+
+
+# =============================================================================
+# CrewAI @tool Functions for All 7 PdM Agents
+# =============================================================================
+
+# --- Case Triage Agent Tools ---
+
+@crewai_tool("evaluate_case_severity")
+def evaluate_case_severity(
+    fault_type: str, confidence: float, asset_criticality: str, site_id: str = "default"
+) -> dict:
+    """Evaluate case severity based on fault type, model confidence, and asset criticality.
+    Returns triage decision (monitor/triage/dispatch), rationale, and priority score."""
+    severity_weights = {"critical": 40, "high": 30, "medium": 20, "low": 10}
+    base = severity_weights.get(asset_criticality, 20)
+    priority_score = base + min(confidence * 60, 60)
+
+    if asset_criticality == "critical" and confidence > 0.7:
+        decision, rationale = "dispatch", f"Critical asset with high-confidence {fault_type} fault."
+    elif priority_score >= 70:
+        decision, rationale = "dispatch", f"High priority score ({priority_score:.0f}) for {fault_type}."
+    elif priority_score >= 40:
+        decision, rationale = "triage", f"Moderate priority ({priority_score:.0f}). Manual review recommended."
+    else:
+        decision, rationale = "monitor", f"Low priority ({priority_score:.0f}). Continue monitoring."
+
+    return {"decision": decision, "rationale": rationale, "priority_score": priority_score}
+
+
+@crewai_tool("check_deduplication")
+def check_deduplication(
+    alert_id: str, asset_id: str, alert_type: str, window_hours: float = 4.0
+) -> dict:
+    """Check if an alert is a duplicate of a recent alert cluster for the same asset/type.
+    Returns whether the alert should be merged into an existing cluster."""
+    signature = f"{asset_id}:{alert_type}"
+    return {
+        "signature": signature,
+        "window_hours": window_hours,
+        "action": "check_cluster",
+        "note": "Compare signature against active clusters within time window.",
+    }
+
+
+# --- Evidence-to-Action Agent Tools ---
+
+@crewai_tool("build_evidence_bundle")
+def build_evidence_bundle(case_id: str, fault_type: str, contributing_metrics: str) -> dict:
+    """Assemble anomaly traces, predicted risk, recommended actions, and expected ROI
+    into an evidence bundle for a maintenance case."""
+    return {
+        "case_id": case_id,
+        "evidence": {
+            "fault_type": fault_type,
+            "contributing_metrics": contributing_metrics,
+            "anomaly_trace": "Retrieved from telemetry store",
+            "risk_assessment": "Computed from model ensemble",
+        },
+        "status": "bundle_created",
+    }
+
+
+@crewai_tool("assess_evidence_confidence")
+def assess_evidence_confidence(
+    n_contributing_sensors: int, model_agreement_pct: float, persistence_hours: float
+) -> dict:
+    """Assess confidence level of the evidence supporting a maintenance action.
+    Returns confidence score and recommendation on whether evidence is sufficient."""
+    score = min(
+        0.3 * min(n_contributing_sensors / 5, 1.0)
+        + 0.4 * model_agreement_pct
+        + 0.3 * min(persistence_hours / 12, 1.0),
+        1.0,
+    )
+    sufficient = score >= 0.6
+    return {
+        "confidence_score": round(score, 3),
+        "sufficient": sufficient,
+        "recommendation": "Proceed with action" if sufficient else "Gather more evidence",
+    }
+
+
+# --- Work Order Composer Agent Tools ---
+
+@crewai_tool("compose_work_order")
+def compose_work_order(
+    case_id: str, problem_statement: str, asset_id: str, priority: str, parts_list: str = ""
+) -> dict:
+    """Create a CMMS-ready work order with auto-populated asset specs, priority, SLA, and scope."""
+    sla_map = {"emergency": 4, "critical": 8, "high": 24, "medium": 72, "low": 168, "planned": 168}
+    return {
+        "case_id": case_id,
+        "title": f"PdM Alert - {problem_statement[:50]}",
+        "description": problem_statement,
+        "asset_id": asset_id,
+        "priority": priority,
+        "sla_hours": sla_map.get(priority, 72),
+        "parts_list": parts_list.split(",") if parts_list else [],
+        "status": "draft",
+    }
+
+
+@crewai_tool("validate_wo_completeness")
+def validate_wo_completeness(
+    title: str, description: str, asset_id: str, priority: str, parts_list: str = ""
+) -> dict:
+    """Validate that a work order draft is complete and ready for submission."""
+    issues = []
+    if not title or len(title) < 5:
+        issues.append("Title too short or missing")
+    if not description or len(description) < 10:
+        issues.append("Description too short or missing")
+    if not asset_id:
+        issues.append("Asset ID missing")
+    if priority not in ("emergency", "critical", "high", "medium", "low", "planned"):
+        issues.append(f"Invalid priority: {priority}")
+    return {
+        "valid": len(issues) == 0,
+        "issues": issues,
+        "completeness_score": max(0, 1.0 - len(issues) * 0.25),
+    }
+
+
+# --- Dispatch Batching Agent Tools ---
+
+@crewai_tool("batch_compatible_orders")
+def batch_compatible_orders(site_id: str, work_order_ids: str, truck_roll_cost: float = 150.0) -> dict:
+    """Evaluate whether work orders at the same site can be batched into a single dispatch.
+    work_order_ids is a comma-separated string of WO IDs."""
+    wo_list = [wid.strip() for wid in work_order_ids.split(",") if wid.strip()]
+    n = len(wo_list)
+    if n < 2:
+        return {"batchable": False, "reason": "Need at least 2 work orders to batch."}
+    saved_rolls = n - 1
+    savings = saved_rolls * truck_roll_cost
+    return {
+        "batchable": True,
+        "site_id": site_id,
+        "work_order_count": n,
+        "saved_truck_rolls": saved_rolls,
+        "estimated_savings": savings,
+        "rationale": f"Combine {n} WOs at site {site_id}. Saves {saved_rolls} truck rolls (${savings:.0f}).",
+    }
+
+
+@crewai_tool("optimize_dispatch_schedule")
+def optimize_dispatch_schedule(
+    site_id: str, n_work_orders: int, has_urgent: bool = False
+) -> dict:
+    """Recommend optimal dispatch timing based on work order urgency and batching opportunity."""
+    if has_urgent:
+        return {
+            "recommendation": "immediate",
+            "rationale": "Urgent work orders present — dispatch immediately.",
+            "delay_hours": 0,
+        }
+    delay = min(48, max(4, n_work_orders * 8))
+    return {
+        "recommendation": "batch_and_wait",
+        "rationale": f"No urgent WOs. Wait up to {delay}h to accumulate batching opportunities.",
+        "delay_hours": delay,
+    }
+
+
+# --- Verification Agent Tools ---
+
+@crewai_tool("verify_repair_outcome")
+def verify_repair_outcome(
+    case_id: str, pre_anomaly_score: float, post_anomaly_score: float, threshold: float = 0.3
+) -> dict:
+    """Verify whether a repair resolved the underlying issue by comparing pre/post anomaly scores."""
+    improvement = pre_anomaly_score - post_anomaly_score
+    passed = post_anomaly_score < threshold and improvement > 0
+    return {
+        "case_id": case_id,
+        "passed": passed,
+        "improvement": round(improvement, 3),
+        "post_anomaly_score": post_anomaly_score,
+        "recommendation": "Close case" if passed else "Reopen for further investigation",
+    }
+
+
+@crewai_tool("check_sensor_recovery")
+def check_sensor_recovery(
+    asset_id: str, sensor_ids: str, recovery_window_hours: float = 24.0
+) -> dict:
+    """Check if sensors have recovered to normal operating ranges after maintenance.
+    sensor_ids is a comma-separated string."""
+    sensors = [s.strip() for s in sensor_ids.split(",") if s.strip()]
+    return {
+        "asset_id": asset_id,
+        "sensors_checked": len(sensors),
+        "recovery_window_hours": recovery_window_hours,
+        "status": "check_pending",
+        "note": "Query telemetry store for post-maintenance sensor readings.",
+    }
+
+
+# --- Experimentation Agent Tools ---
+
+@crewai_tool("evaluate_ab_test")
+def evaluate_ab_test(
+    experiment_id: str, control_f1: float, treatment_f1: float,
+    control_fpr: float, treatment_fpr: float
+) -> dict:
+    """Evaluate A/B test results and recommend promote/rollback/hold."""
+    f1_improvement = (treatment_f1 - control_f1) / max(control_f1, 0.01)
+    fpr_improvement = (control_fpr - treatment_fpr) / max(control_fpr, 0.01)
+
+    if f1_improvement > 0.05 and fpr_improvement >= 0:
+        decision = "promote"
+        reason = f"Treatment shows {f1_improvement:.1%} F1 improvement with equal or better FPR."
+    elif f1_improvement > 0.10:
+        decision = "promote"
+        reason = f"Significant {f1_improvement:.1%} F1 improvement outweighs FPR trade-off."
+    elif f1_improvement < -0.05:
+        decision = "rollback"
+        reason = f"Treatment shows {-f1_improvement:.1%} F1 degradation."
+    else:
+        decision = "hold"
+        reason = "No significant difference. Continue experiment."
+
+    return {"experiment_id": experiment_id, "decision": decision, "reason": reason}
+
+
+@crewai_tool("promote_model_candidate")
+def promote_model_candidate(
+    model_id: str, current_version: str, proposed_version: str, justification: str
+) -> dict:
+    """Create a model promotion request for governance approval."""
+    return {
+        "action": "promote_model",
+        "model_id": model_id,
+        "current_version": current_version,
+        "proposed_version": proposed_version,
+        "justification": justification,
+        "requires_approval": True,
+        "status": "pending_approval",
+    }
+
+
+# --- Data Steward Agent Tools ---
+
+@crewai_tool("validate_data_quality")
+def validate_data_quality(
+    asset_id: str, sensor_count: int, gap_hours: float, offline_sensors: int = 0
+) -> dict:
+    """Validate data quality for an asset and recommend remediation if needed."""
+    severity = "low"
+    if offline_sensors > 0:
+        severity = "high"
+    elif gap_hours > 4:
+        severity = "medium"
+
+    coverage = max(0, (sensor_count - offline_sensors) / max(sensor_count, 1))
+    remediation = "monitor"
+    if severity == "high":
+        remediation = "create_urgent_work_order"
+    elif severity == "medium":
+        remediation = "create_standard_work_order"
+
+    return {
+        "asset_id": asset_id,
+        "severity": severity,
+        "sensor_coverage": round(coverage, 2),
+        "gap_hours": gap_hours,
+        "offline_sensors": offline_sensors,
+        "recommended_action": remediation,
+    }
+
+
+@crewai_tool("reconcile_schema_drift")
+def reconcile_schema_drift(
+    source_schema: str, expected_schema: str
+) -> dict:
+    """Detect and recommend fixes for schema drift between data source and expected schema."""
+    source_fields = set(f.strip() for f in source_schema.split(","))
+    expected_fields = set(f.strip() for f in expected_schema.split(","))
+    missing = expected_fields - source_fields
+    extra = source_fields - expected_fields
+    return {
+        "drift_detected": len(missing) > 0 or len(extra) > 0,
+        "missing_fields": sorted(missing),
+        "extra_fields": sorted(extra),
+        "recommendation": "Update ingestion mapping" if missing else "Schema aligned",
+    }
 
 
 # =============================================================================

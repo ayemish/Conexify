@@ -151,7 +151,7 @@ export default function LandingPage({ onNavigate }) {
           <div style={s.logoMark}>
             <Layers size={32} strokeWidth={2} />
           </div>
-          <div style={s.eyebrow}>Predictive Maintenance Intelligence</div>
+          <div style={s.eyebrow}>Energy Consuming Asset Intelligence</div>
           <h1 style={s.h1}>
             LoweConex <span style={s.iq}>iQ</span>
           </h1>

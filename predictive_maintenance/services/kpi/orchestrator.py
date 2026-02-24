@@ -124,6 +124,9 @@ class KPIDashboardResult:
 
     # Governance
     governance: Dict[str, Any] = field(default_factory=dict)
+    data_source: str = "deterministic_kpi_orchestrator"
+    degraded_mode: bool = False
+    warnings: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -136,6 +139,9 @@ class KPIDashboardResult:
             "location_ranking": self.location_ranking,
             "roi": self.roi,
             "governance": self.governance,
+            "data_source": self.data_source,
+            "degraded_mode": self.degraded_mode,
+            "warnings": self.warnings,
         }
 
 
@@ -247,6 +253,10 @@ class KPIOrchestrator:
         }
         # LRU-style cache for scenario comparisons keyed by data fingerprint
         self._scenario_cache: Dict[str, List[Dict[str, Any]]] = {}
+
+    @staticmethod
+    def _warning(code: str, message: str, **context: Any) -> Dict[str, Any]:
+        return {"code": code, "message": message, "context": context}
 
     def compute_pipeline(
         self,
@@ -390,6 +400,9 @@ class KPIOrchestrator:
         implementation_cost : float
             Estimated cost to deploy the PdM platform.
         """
+        warnings_out: List[Dict[str, Any]] = []
+        degraded_mode = False
+
         # Store references for per-location re-computation in _rank_locations
         self._last_alert_data = alert_data
         self._last_telemetry_summary = telemetry_summary
@@ -431,6 +444,25 @@ class KPIOrchestrator:
                 })
             except Exception as e:
                 logger.error("KPI %s computation failed: %s", name, e, exc_info=True)
+                degraded_mode = True
+                warnings_out.append(
+                    self._warning(
+                        "KPI_COMPUTATION_FAILED",
+                        "KPI computation failed; returning partial scorecard with error status.",
+                        site_id=self.config.site_id,
+                        kpi_name=name,
+                        error=str(e),
+                    )
+                )
+                try:
+                    from ...observability.metrics import metrics
+                    metrics.record_kpi_computation_skipped(
+                        site_id=self.config.site_id,
+                        kpi_name=name,
+                        reason="compute_exception",
+                    )
+                except Exception as metrics_err:
+                    logger.debug("Metrics emission skipped (kpi compute failed): %s", metrics_err)
                 results.append(KPIResult(
                     kpi_name=name,
                     display_name=service.display_name,
@@ -449,6 +481,15 @@ class KPIOrchestrator:
             results = recalibrate_from_mv(results, self.config)
         except Exception as recal_err:
             logger.debug("Confidence recalibration skipped: %s", recal_err)
+            degraded_mode = True
+            warnings_out.append(
+                self._warning(
+                    "KPI_RECALIBRATION_SKIPPED",
+                    "Confidence recalibration skipped due to non-fatal error.",
+                    site_id=self.config.site_id,
+                    error=str(recal_err),
+                )
+            )
 
         # Reconcile double-counting across KPIs
         _emit_event("CREW_PROGRESS", self.config.site_id, correlation_id, {
@@ -498,6 +539,7 @@ class KPIOrchestrator:
             alert_data=alert_data,
             telemetry_summary=telemetry_summary,
             health_data=health_data,
+            warnings_out=warnings_out,
         )
 
         # ── 4. Strategic recommendations ──────────────────────────
@@ -522,7 +564,7 @@ class KPIOrchestrator:
 
         # ── 5. Location ranking ───────────────────────────────────
         location_ranking = self._rank_locations(
-            results, asset_data, health_data, location_map
+            results, asset_data, health_data, location_map, warnings_out=warnings_out
         )
 
         # ── 6. ROI calculation ────────────────────────────────────
@@ -530,6 +572,9 @@ class KPIOrchestrator:
 
         # ── 7. Governance modules ─────────────────────────────────
         governance = self._check_governance()
+        if governance.get("warnings"):
+            warnings_out.extend(governance.get("warnings", []))
+            degraded_mode = True
         governance["loweconex_bridge"] = get_bridge_status()
         if reconciliation.get("reconciled"):
             governance["savings_reconciliation"] = reconciliation
@@ -546,6 +591,9 @@ class KPIOrchestrator:
             location_ranking=location_ranking,
             roi=roi,
             governance=governance,
+            data_source="deterministic_kpi_orchestrator",
+            degraded_mode=degraded_mode,
+            warnings=warnings_out,
         )
 
         _emit_event("CREW_COMPLETED", self.config.site_id, correlation_id, {
@@ -613,6 +661,7 @@ class KPIOrchestrator:
         alert_data: List[Dict[str, Any]],
         telemetry_summary: Dict[str, Any],
         health_data: List[Dict[str, Any]],
+        warnings_out: Optional[List[Dict[str, Any]]] = None,
     ) -> List[Dict[str, Any]]:
         """Re-run KPI computations with varied parameter sets per scenario.
 
@@ -658,8 +707,34 @@ class KPIOrchestrator:
                             health_data=health_data,
                         )
                         scenario_total += result.savings_medium
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.warning(
+                            "Scenario KPI compute skipped: scenario=%s kpi=%s site_id=%s error=%s",
+                            profile_name,
+                            name,
+                            self.config.site_id,
+                            exc,
+                        )
+                        if warnings_out is not None:
+                            warnings_out.append(
+                                self._warning(
+                                    "SCENARIO_KPI_SKIPPED",
+                                    "Scenario KPI computation skipped due to non-fatal error.",
+                                    site_id=self.config.site_id,
+                                    scenario=profile_name,
+                                    kpi_name=name,
+                                    error=str(exc),
+                                )
+                            )
+                        try:
+                            from ...observability.metrics import metrics
+                            metrics.record_kpi_computation_skipped(
+                                site_id=self.config.site_id,
+                                kpi_name=name,
+                                reason=f"scenario:{profile_name}",
+                            )
+                        except Exception as metrics_err:
+                            logger.debug("Metrics emission skipped (scenario kpi skipped): %s", metrics_err)
 
                 scenarios.append({
                     "scenario_name": profile_name,
@@ -801,6 +876,7 @@ class KPIOrchestrator:
         asset_data: List[Dict[str, Any]],
         health_data: List[Dict[str, Any]],
         location_map: Optional[Dict[str, Dict[str, Any]]],
+        warnings_out: Optional[List[Dict[str, Any]]] = None,
     ) -> List[Dict[str, Any]]:
         """Rank locations by total savings potential.
 
@@ -889,8 +965,34 @@ class KPIOrchestrator:
                     loc_total += r.savings_medium
                     loc_kpi_savings[name] = r.savings_medium
                     computed_count += 1
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning(
+                        "Location KPI compute skipped: site_id=%s location_id=%s kpi=%s error=%s",
+                        self.config.site_id,
+                        loc_id,
+                        name,
+                        exc,
+                    )
+                    if warnings_out is not None:
+                        warnings_out.append(
+                            self._warning(
+                                "LOCATION_KPI_SKIPPED",
+                                "Location KPI computation skipped due to non-fatal error.",
+                                site_id=self.config.site_id,
+                                location_id=loc_id,
+                                kpi_name=name,
+                                error=str(exc),
+                            )
+                        )
+                    try:
+                        from ...observability.metrics import metrics
+                        metrics.record_kpi_computation_skipped(
+                            site_id=self.config.site_id,
+                            kpi_name=name,
+                            reason=f"location:{loc_id}",
+                        )
+                    except Exception as metrics_err:
+                        logger.debug("Metrics emission skipped (location kpi skipped): %s", metrics_err)
 
             top_kpi = max(loc_kpi_savings, key=loc_kpi_savings.get) if loc_kpi_savings else ""
 
@@ -973,29 +1075,32 @@ class KPIOrchestrator:
     def _check_governance(self) -> Dict[str, Any]:
         """Check which governance modules are active."""
         active_modules = []
-        try:
-            from loweconex_platform.lineage import LineageTracker
-            active_modules.append("lineage")
-        except Exception:
-            pass
-        try:
-            from loweconex_platform.data_quality import DataQualityEngine
-            active_modules.append("data_quality")
-        except Exception:
-            pass
-        try:
-            from loweconex_platform.mlops import ModelRegistry
-            active_modules.append("mlops")
-        except Exception:
-            pass
-        try:
-            from loweconex_platform.agent_ops import GoldenTestSuite
-            active_modules.append("agent_ops")
-        except Exception:
-            pass
-        try:
-            from loweconex_platform.ai_risk import AIRiskRegistry
-            active_modules.append("ai_risk")
-        except Exception:
-            pass
-        return {"modules_active": active_modules}
+        warnings: List[Dict[str, Any]] = []
+
+        def _probe(module_import: str, label: str):
+            try:
+                __import__(module_import, fromlist=["*"])
+                active_modules.append(label)
+            except Exception as exc:
+                logger.info(
+                    "Governance module not active: site_id=%s module=%s error=%s",
+                    self.config.site_id,
+                    label,
+                    exc,
+                )
+                warnings.append(
+                    self._warning(
+                        "GOVERNANCE_MODULE_INACTIVE",
+                        "Optional governance module unavailable.",
+                        site_id=self.config.site_id,
+                        module=label,
+                        error=str(exc),
+                    )
+                )
+
+        _probe("loweconex_platform.lineage", "lineage")
+        _probe("loweconex_platform.data_quality", "data_quality")
+        _probe("loweconex_platform.mlops", "mlops")
+        _probe("loweconex_platform.agent_ops", "agent_ops")
+        _probe("loweconex_platform.ai_risk", "ai_risk")
+        return {"modules_active": active_modules, "warnings": warnings}

@@ -11,6 +11,7 @@ Provides real-time streaming of:
 import asyncio
 import json
 import logging
+import os
 import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set
@@ -135,6 +136,63 @@ def get_connection_manager() -> ConnectionManager:
     return manager
 
 
+def _extract_ws_token(websocket: WebSocket, header_name: str) -> Optional[str]:
+    """Extract auth token from websocket headers/query parameters."""
+    api_key = websocket.headers.get(header_name) or websocket.query_params.get("api_key")
+    if api_key:
+        return api_key
+
+    authz = websocket.headers.get("authorization", "")
+    if authz.lower().startswith("bearer "):
+        bearer = authz[7:].strip()
+        if bearer:
+            return bearer
+
+    token_qs = websocket.query_params.get("token")
+    if token_qs:
+        return token_qs
+    return None
+
+
+async def _authorize_websocket(websocket: WebSocket) -> bool:
+    """Authorize websocket using API key or bearer token."""
+    try:
+        configured_keys = {
+            key.strip()
+            for key in os.getenv("PDM_API_KEYS", "").split(",")
+            if key.strip()
+        }
+        header_name = os.getenv("PDM_API_KEY_HEADER", "X-API-Key") or "X-API-Key"
+        if not configured_keys:
+            from ..config import get_settings
+            settings = get_settings()
+            configured_keys = set(getattr(getattr(settings, "api", None), "api_keys", []) or [])
+            header_name = (
+                getattr(getattr(settings, "api", None), "api_key_header", header_name)
+                or header_name
+            )
+    except Exception as exc:
+        logger.error("WebSocket auth configuration unavailable: %s", exc)
+        await websocket.close(code=4401, reason="auth_config_unavailable")
+        return False
+
+    if not configured_keys:
+        logger.warning("WebSocket auth denied: no API keys configured")
+        await websocket.close(code=4401, reason="auth_not_configured")
+        return False
+
+    token = _extract_ws_token(websocket, header_name)
+    if not token:
+        await websocket.close(code=4401, reason="missing_api_key_or_bearer")
+        return False
+
+    if token not in configured_keys:
+        await websocket.close(code=4403, reason="invalid_credentials")
+        return False
+
+    return True
+
+
 async def _heartbeat_loop(websocket: WebSocket, channel: str):
     """Server-side heartbeat: send ping, expect pong within timeout.
 
@@ -210,6 +268,9 @@ async def operator_websocket(websocket: WebSocket):
     - Approval queue changes
     - Fleet status updates
     """
+    if not await _authorize_websocket(websocket):
+        return
+
     await manager.connect(websocket, "operator")
     
     try:
@@ -252,6 +313,9 @@ async def asset_dashboard_websocket(
     - Alert updates
     - RUL estimates
     """
+    if not await _authorize_websocket(websocket):
+        return
+
     channel = f"asset:{asset_id}"
     await manager.connect(websocket, channel)
     
@@ -291,6 +355,9 @@ async def approvals_websocket(websocket: WebSocket):
     - Status changes
     - Decision notifications
     """
+    if not await _authorize_websocket(websocket):
+        return
+
     channel = "approvals"
     await manager.connect(websocket, channel)
     

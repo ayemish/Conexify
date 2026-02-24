@@ -1,0 +1,16 @@
+scipy>=1.7.0
+scikit-learn>=1.0.0
+shap>=0.42.0
+openai>=1.30.0
+flwr>=1.7.0
+
+# Multi-agent + streaming/queue integrations
+crewai>=0.1.0
+kafka-python>=2.0.2
+
+# Knowledge graph + DAG orchestration
+networkx>=3.1
+
+# Federated Learning LLM prototype (optional)
+peft>=0.7.0
+transformers>=4.36.0

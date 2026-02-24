@@ -14,11 +14,19 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from loweconex_platform.digital_twins.models import (
+    AgentAction,
     AssetTwin,
+    ComponentTwin,
+    ControllerTwin,
+    DataSourceRegistration,
     EstateTwin,
     KPIRollup,
     LocationTwin,
+    SensorPointTwin,
+    ServiceProviderTwin,
+    TechnicianProfile,
     TwinRelationship,
+    WorkOrderTwin,
 )
 
 logger = logging.getLogger(__name__)
@@ -156,6 +164,14 @@ class TwinStore:
         self._assets: Dict[str, AssetTwin] = {}
         self._locations: Dict[str, LocationTwin] = {}
         self._estates: Dict[str, EstateTwin] = {}
+        self._controllers: Dict[str, ControllerTwin] = {}
+        self._sensor_points: Dict[str, SensorPointTwin] = {}
+        self._components: Dict[str, ComponentTwin] = {}
+        self._data_sources: Dict[str, DataSourceRegistration] = {}
+        self._work_orders: Dict[str, WorkOrderTwin] = {}
+        self._service_providers: Dict[str, ServiceProviderTwin] = {}
+        self._technicians: Dict[str, TechnicianProfile] = {}
+        self._agent_actions: Dict[str, AgentAction] = {}
         # Relationships
         self._relationships: List[TwinRelationship] = []
         # Time-series: {point_id: [TimeSeriesPoint]}
@@ -165,6 +181,16 @@ class TwinStore:
         # Index: company -> location -> asset
         self._company_locations: Dict[str, List[str]] = defaultdict(list)
         self._location_assets: Dict[str, List[str]] = defaultdict(list)
+        # Index: new entity cross-references
+        self._location_controllers: Dict[str, List[str]] = defaultdict(list)
+        self._controller_assets: Dict[str, List[str]] = defaultdict(list)
+        self._asset_components: Dict[str, List[str]] = defaultdict(list)
+        self._asset_sensor_points: Dict[str, List[str]] = defaultdict(list)
+        self._asset_work_orders: Dict[str, List[str]] = defaultdict(list)
+        self._location_work_orders: Dict[str, List[str]] = defaultdict(list)
+        self._asset_agent_actions: Dict[str, List[str]] = defaultdict(list)
+        self._location_data_sources: Dict[str, List[str]] = defaultdict(list)
+        self._provider_technicians: Dict[str, List[str]] = defaultdict(list)
 
         # Idempotency: track processed run_ids to prevent duplicate ingestion
         self._processed_run_ids: Dict[str, datetime] = {}
@@ -455,6 +481,260 @@ class TwinStore:
         return events[:limit]
 
     # -------------------------------------------------------------------------
+    # Controller CRUD
+    # -------------------------------------------------------------------------
+
+    def upsert_controller(self, controller: ControllerTwin) -> ControllerTwin:
+        with self._lock:
+            controller.updated_ts = datetime.utcnow()
+            self._controllers[controller.controller_id] = controller
+            if controller.controller_id not in self._location_controllers[controller.location_id]:
+                self._location_controllers[controller.location_id].append(controller.controller_id)
+            for aid in controller.managed_asset_ids:
+                if aid not in self._controller_assets[controller.controller_id]:
+                    self._controller_assets[controller.controller_id].append(aid)
+            rev = self._bump_revision("controller", controller.controller_id)
+            logger.debug(f"Controller {controller.controller_id} upserted (rev={rev})")
+            return controller
+
+    def get_controller(self, controller_id: str) -> Optional[ControllerTwin]:
+        return self._controllers.get(controller_id)
+
+    def get_controllers_by_location(self, location_id: str) -> List[ControllerTwin]:
+        ids = self._location_controllers.get(location_id, [])
+        return [self._controllers[c] for c in ids if c in self._controllers]
+
+    def get_controller_assets(self, controller_id: str) -> List[AssetTwin]:
+        ids = self._controller_assets.get(controller_id, [])
+        return [self._assets[a] for a in ids if a in self._assets]
+
+    def delete_controller(self, controller_id: str) -> bool:
+        with self._lock:
+            ctrl = self._controllers.pop(controller_id, None)
+            if ctrl:
+                loc_list = self._location_controllers.get(ctrl.location_id, [])
+                if controller_id in loc_list:
+                    loc_list.remove(controller_id)
+                self._controller_assets.pop(controller_id, None)
+                return True
+            return False
+
+    # -------------------------------------------------------------------------
+    # SensorPoint CRUD
+    # -------------------------------------------------------------------------
+
+    def upsert_sensor_point(self, point: SensorPointTwin) -> SensorPointTwin:
+        with self._lock:
+            point.updated_ts = datetime.utcnow()
+            self._sensor_points[point.point_id] = point
+            if point.point_id not in self._asset_sensor_points[point.asset_id]:
+                self._asset_sensor_points[point.asset_id].append(point.point_id)
+            self._bump_revision("sensor_point", point.point_id)
+            return point
+
+    def get_sensor_point(self, point_id: str) -> Optional[SensorPointTwin]:
+        return self._sensor_points.get(point_id)
+
+    def get_sensor_points_by_asset(self, asset_id: str) -> List[SensorPointTwin]:
+        ids = self._asset_sensor_points.get(asset_id, [])
+        return [self._sensor_points[p] for p in ids if p in self._sensor_points]
+
+    def delete_sensor_point(self, point_id: str) -> bool:
+        with self._lock:
+            pt = self._sensor_points.pop(point_id, None)
+            if pt:
+                lst = self._asset_sensor_points.get(pt.asset_id, [])
+                if point_id in lst:
+                    lst.remove(point_id)
+                return True
+            return False
+
+    # -------------------------------------------------------------------------
+    # Component CRUD
+    # -------------------------------------------------------------------------
+
+    def upsert_component(self, component: ComponentTwin) -> ComponentTwin:
+        with self._lock:
+            component.updated_ts = datetime.utcnow()
+            self._components[component.component_id] = component
+            if component.component_id not in self._asset_components[component.parent_asset_id]:
+                self._asset_components[component.parent_asset_id].append(component.component_id)
+            self._bump_revision("component", component.component_id)
+            return component
+
+    def get_component(self, component_id: str) -> Optional[ComponentTwin]:
+        return self._components.get(component_id)
+
+    def get_components_by_asset(self, asset_id: str) -> List[ComponentTwin]:
+        ids = self._asset_components.get(asset_id, [])
+        return [self._components[c] for c in ids if c in self._components]
+
+    def delete_component(self, component_id: str) -> bool:
+        with self._lock:
+            comp = self._components.pop(component_id, None)
+            if comp:
+                lst = self._asset_components.get(comp.parent_asset_id, [])
+                if component_id in lst:
+                    lst.remove(component_id)
+                return True
+            return False
+
+    # -------------------------------------------------------------------------
+    # DataSource CRUD
+    # -------------------------------------------------------------------------
+
+    def upsert_data_source(self, source: DataSourceRegistration) -> DataSourceRegistration:
+        with self._lock:
+            source.updated_ts = datetime.utcnow()
+            self._data_sources[source.source_id] = source
+            if source.location_id:
+                if source.source_id not in self._location_data_sources[source.location_id]:
+                    self._location_data_sources[source.location_id].append(source.source_id)
+            self._bump_revision("data_source", source.source_id)
+            return source
+
+    def get_data_source(self, source_id: str) -> Optional[DataSourceRegistration]:
+        return self._data_sources.get(source_id)
+
+    def get_data_sources_by_location(self, location_id: str) -> List[DataSourceRegistration]:
+        ids = self._location_data_sources.get(location_id, [])
+        return [self._data_sources[s] for s in ids if s in self._data_sources]
+
+    def delete_data_source(self, source_id: str) -> bool:
+        with self._lock:
+            src = self._data_sources.pop(source_id, None)
+            if src and src.location_id:
+                lst = self._location_data_sources.get(src.location_id, [])
+                if source_id in lst:
+                    lst.remove(source_id)
+                return True
+            return src is not None
+
+    # -------------------------------------------------------------------------
+    # WorkOrder CRUD
+    # -------------------------------------------------------------------------
+
+    def upsert_work_order(self, wo: WorkOrderTwin) -> WorkOrderTwin:
+        with self._lock:
+            wo.updated_ts = datetime.utcnow()
+            self._work_orders[wo.wo_id] = wo
+            if wo.wo_id not in self._asset_work_orders[wo.asset_id]:
+                self._asset_work_orders[wo.asset_id].append(wo.wo_id)
+            if wo.wo_id not in self._location_work_orders[wo.location_id]:
+                self._location_work_orders[wo.location_id].append(wo.wo_id)
+            self._bump_revision("work_order", wo.wo_id)
+            return wo
+
+    def get_work_order(self, wo_id: str) -> Optional[WorkOrderTwin]:
+        return self._work_orders.get(wo_id)
+
+    def get_work_orders_by_asset(self, asset_id: str) -> List[WorkOrderTwin]:
+        ids = self._asset_work_orders.get(asset_id, [])
+        return [self._work_orders[w] for w in ids if w in self._work_orders]
+
+    def get_work_orders_by_location(self, location_id: str) -> List[WorkOrderTwin]:
+        ids = self._location_work_orders.get(location_id, [])
+        return [self._work_orders[w] for w in ids if w in self._work_orders]
+
+    def get_open_work_orders_by_location(self, location_id: str) -> List[WorkOrderTwin]:
+        return [
+            wo for wo in self.get_work_orders_by_location(location_id)
+            if wo.status.value in ("draft", "open", "dispatched", "in_progress", "on_hold")
+        ]
+
+    def delete_work_order(self, wo_id: str) -> bool:
+        with self._lock:
+            wo = self._work_orders.pop(wo_id, None)
+            if wo:
+                for lst in (self._asset_work_orders.get(wo.asset_id, []),
+                            self._location_work_orders.get(wo.location_id, [])):
+                    if wo_id in lst:
+                        lst.remove(wo_id)
+                return True
+            return False
+
+    # -------------------------------------------------------------------------
+    # ServiceProvider CRUD
+    # -------------------------------------------------------------------------
+
+    def upsert_service_provider(self, provider: ServiceProviderTwin) -> ServiceProviderTwin:
+        with self._lock:
+            provider.updated_ts = datetime.utcnow()
+            self._service_providers[provider.provider_id] = provider
+            self._bump_revision("service_provider", provider.provider_id)
+            return provider
+
+    def get_service_provider(self, provider_id: str) -> Optional[ServiceProviderTwin]:
+        return self._service_providers.get(provider_id)
+
+    def get_providers_by_company(self, company_id: str) -> List[ServiceProviderTwin]:
+        return [p for p in self._service_providers.values() if p.company_id == company_id]
+
+    def get_providers_by_location(self, location_id: str) -> List[ServiceProviderTwin]:
+        return [
+            p for p in self._service_providers.values()
+            if location_id in p.service_regions
+        ]
+
+    # -------------------------------------------------------------------------
+    # Technician CRUD
+    # -------------------------------------------------------------------------
+
+    def upsert_technician(self, tech: TechnicianProfile) -> TechnicianProfile:
+        with self._lock:
+            tech.updated_ts = datetime.utcnow()
+            self._technicians[tech.technician_id] = tech
+            if tech.technician_id not in self._provider_technicians[tech.provider_id]:
+                self._provider_technicians[tech.provider_id].append(tech.technician_id)
+            self._bump_revision("technician", tech.technician_id)
+            return tech
+
+    def get_technician(self, technician_id: str) -> Optional[TechnicianProfile]:
+        return self._technicians.get(technician_id)
+
+    def get_technicians_by_provider(self, provider_id: str) -> List[TechnicianProfile]:
+        ids = self._provider_technicians.get(provider_id, [])
+        return [self._technicians[t] for t in ids if t in self._technicians]
+
+    def get_available_technicians(self, location_id: str, trade: Optional[str] = None) -> List[TechnicianProfile]:
+        results = [
+            t for t in self._technicians.values()
+            if t.is_available and location_id in t.assigned_locations
+        ]
+        if trade:
+            results = [t for t in results if trade in t.trades]
+        return results
+
+    # -------------------------------------------------------------------------
+    # AgentAction CRUD
+    # -------------------------------------------------------------------------
+
+    def store_agent_action(self, action: AgentAction) -> AgentAction:
+        with self._lock:
+            self._agent_actions[action.action_id] = action
+            if action.asset_id:
+                if action.action_id not in self._asset_agent_actions[action.asset_id]:
+                    self._asset_agent_actions[action.asset_id].append(action.action_id)
+            self._bump_revision("agent_action", action.action_id)
+            return action
+
+    def get_agent_action(self, action_id: str) -> Optional[AgentAction]:
+        return self._agent_actions.get(action_id)
+
+    def get_agent_actions_by_asset(self, asset_id: str) -> List[AgentAction]:
+        ids = self._asset_agent_actions.get(asset_id, [])
+        return [self._agent_actions[a] for a in ids if a in self._agent_actions]
+
+    def get_pending_agent_actions(self, company_id: Optional[str] = None) -> List[AgentAction]:
+        actions = [
+            a for a in self._agent_actions.values()
+            if a.approval_status == "pending"
+        ]
+        if company_id:
+            actions = [a for a in actions if a.company_id == company_id]
+        return actions
+
+    # -------------------------------------------------------------------------
     # Stats
     # -------------------------------------------------------------------------
 
@@ -463,6 +743,14 @@ class TwinStore:
             "assets": len(self._assets),
             "locations": len(self._locations),
             "estates": len(self._estates),
+            "controllers": len(self._controllers),
+            "sensor_points": len(self._sensor_points),
+            "components": len(self._components),
+            "data_sources": len(self._data_sources),
+            "work_orders": len(self._work_orders),
+            "service_providers": len(self._service_providers),
+            "technicians": len(self._technicians),
+            "agent_actions": len(self._agent_actions),
             "relationships": len(self._relationships),
             "timeseries_points": sum(len(v) for v in self._timeseries.values()),
             "events": len(self._events),

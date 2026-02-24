@@ -14,7 +14,25 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-from loweconex_platform.digital_twins.models import AssetTwin, AssetType, LocationTwin
+from loweconex_platform.digital_twins.models import (
+    AgentAction,
+    AssetTwin,
+    AssetType,
+    ComponentTwin,
+    ComponentType,
+    ControllerTwin,
+    ControllerType,
+    DataSourceRegistration,
+    DataSourceType,
+    LocationTwin,
+    SensorPointTwin,
+    ServiceProviderTwin,
+    TechnicianProfile,
+    WorkOrderTwin,
+    WOPriority,
+    WOStatus,
+    WOType,
+)
 from loweconex_platform.digital_twins.store import OperationalEvent, TimeSeriesPoint, TwinStore
 from loweconex_platform.lineage.lineage_tracker import LineageTracker
 
@@ -292,6 +310,13 @@ class Normalizer:
             "assets_created": 0,
             "assets_updated": 0,
             "locations_created": 0,
+            "controllers_created": 0,
+            "components_created": 0,
+            "sensor_points_created": 0,
+            "data_sources_created": 0,
+            "work_orders_created": 0,
+            "service_providers_created": 0,
+            "technicians_created": 0,
             "events_created": 0,
             "timeseries_points": 0,
             "errors": [],
@@ -342,6 +367,20 @@ class Normalizer:
                     self._load_location(canonical, company_id, stats)
                 elif mapping.source_type == "energy":
                     self._load_telemetry(canonical, company_id, source_system, mapping, stats)
+                elif mapping.source_type == "controller_registry":
+                    self._load_controller(canonical, company_id, source_system, stats)
+                elif mapping.source_type == "component_registry":
+                    self._load_component(canonical, company_id, stats)
+                elif mapping.source_type == "sensor_point_registry":
+                    self._load_sensor_point(canonical, company_id, stats)
+                elif mapping.source_type == "data_source_registry":
+                    self._load_data_source(canonical, company_id, stats)
+                elif mapping.source_type == "work_order_registry":
+                    self._load_work_order(canonical, company_id, source_system, stats)
+                elif mapping.source_type == "service_provider_registry":
+                    self._load_service_provider(canonical, company_id, stats)
+                elif mapping.source_type == "technician_registry":
+                    self._load_technician(canonical, company_id, stats)
                 else:
                     self._load_event(canonical, company_id, source_system, mapping, stats)
 
@@ -634,3 +673,202 @@ class Normalizer:
             )
             self.twin_store.upsert_location(location)
             stats["locations_created"] += 1
+
+    def _load_controller(
+        self, canonical: Dict, company_id: str, source_system: str, stats: Dict,
+    ):
+        """Load a normalized controller registry row."""
+        controller_id = canonical.get("controller_id", str(uuid.uuid4()))
+        location_src_id = canonical.get("location_id", "")
+        location_id = self.identity.resolve_or_create_location(
+            source_system, location_src_id, company_id
+        ) if location_src_id else ""
+
+        ctrl_type_str = canonical.get("controller_type", "other")
+        try:
+            ctrl_type = ControllerType(ctrl_type_str)
+        except ValueError:
+            ctrl_type = ControllerType.OTHER
+
+        managed_ids = canonical.get("managed_asset_ids", [])
+        if isinstance(managed_ids, str):
+            managed_ids = [s.strip() for s in managed_ids.split(",") if s.strip()]
+
+        controller = ControllerTwin(
+            controller_id=controller_id,
+            location_id=location_id,
+            company_id=company_id,
+            controller_type=ctrl_type,
+            manufacturer=canonical.get("manufacturer"),
+            model=canonical.get("model"),
+            firmware_version=canonical.get("firmware_version"),
+            ip_address=canonical.get("ip_address"),
+            protocol=canonical.get("protocol", "bacnet"),
+            managed_asset_ids=managed_ids,
+        )
+        self.twin_store.upsert_controller(controller)
+        stats["controllers_created"] += 1
+
+    def _load_component(self, canonical: Dict, company_id: str, stats: Dict):
+        """Load a normalized component registry row."""
+        component_id = canonical.get("component_id", str(uuid.uuid4()))
+        parent_asset_id = canonical.get("parent_asset_id", "")
+
+        comp_type_str = canonical.get("component_type", "other")
+        try:
+            comp_type = ComponentType(comp_type_str)
+        except ValueError:
+            comp_type = ComponentType.OTHER
+
+        component = ComponentTwin(
+            component_id=component_id,
+            parent_asset_id=parent_asset_id,
+            component_type=comp_type,
+            manufacturer=canonical.get("manufacturer"),
+            model=canonical.get("model"),
+            serial=canonical.get("serial"),
+        )
+        self.twin_store.upsert_component(component)
+        stats["components_created"] += 1
+
+    def _load_sensor_point(self, canonical: Dict, company_id: str, stats: Dict):
+        """Load a normalized sensor point registry row."""
+        point_id = canonical.get("point_id", str(uuid.uuid4()))
+        asset_id = canonical.get("asset_id", "")
+
+        haystack_tags = canonical.get("haystack_tags", [])
+        if isinstance(haystack_tags, str):
+            haystack_tags = [t.strip() for t in haystack_tags.split(",") if t.strip()]
+
+        point = SensorPointTwin(
+            point_id=point_id,
+            asset_id=asset_id,
+            point_type=canonical.get("point_type", ""),
+            unit=canonical.get("unit", ""),
+            brick_class=canonical.get("brick_class"),
+            haystack_tags=haystack_tags,
+            protocol_address=canonical.get("protocol_address"),
+        )
+        self.twin_store.upsert_sensor_point(point)
+        stats["sensor_points_created"] += 1
+
+    def _load_data_source(self, canonical: Dict, company_id: str, stats: Dict):
+        """Load a normalized data source registration row."""
+        source_id = canonical.get("source_id", str(uuid.uuid4()))
+
+        src_type_str = canonical.get("source_type", "other")
+        try:
+            src_type = DataSourceType(src_type_str)
+        except ValueError:
+            src_type = DataSourceType.OTHER
+
+        source = DataSourceRegistration(
+            source_id=source_id,
+            company_id=company_id,
+            source_type=src_type,
+            source_name=canonical.get("source_name", ""),
+            location_id=canonical.get("location_id"),
+            connection_config=canonical.get("connection_config", {}),
+        )
+        self.twin_store.upsert_data_source(source)
+        stats["data_sources_created"] += 1
+
+    def _load_work_order(
+        self, canonical: Dict, company_id: str, source_system: str, stats: Dict,
+    ):
+        """Load a normalized work order registry row."""
+        wo_id = canonical.get("wo_id", str(uuid.uuid4()))
+        asset_src_id = canonical.get("asset_id", "")
+        location_src_id = canonical.get("location_id", "")
+
+        location_id = self.identity.resolve_or_create_location(
+            source_system, location_src_id, company_id
+        ) if location_src_id else ""
+        asset_id = self.identity.resolve_or_create_asset(
+            source_system, asset_src_id, company_id, location_id
+        ) if asset_src_id else ""
+
+        wo_type_str = canonical.get("wo_type", "reactive")
+        try:
+            wo_type = WOType(wo_type_str)
+        except ValueError:
+            wo_type = WOType.REACTIVE
+
+        priority_str = canonical.get("priority", "p3_normal")
+        try:
+            priority = WOPriority(priority_str)
+        except ValueError:
+            priority = WOPriority.P3_NORMAL
+
+        status_str = canonical.get("status", "draft")
+        try:
+            status = WOStatus(status_str)
+        except ValueError:
+            status = WOStatus.DRAFT
+
+        wo = WorkOrderTwin(
+            wo_id=wo_id,
+            asset_id=asset_id,
+            location_id=location_id,
+            company_id=company_id,
+            wo_type=wo_type,
+            priority=priority,
+            status=status,
+            problem_description=canonical.get("description", ""),
+            assigned_provider_id=canonical.get("assigned_provider_id"),
+            assigned_technician_id=canonical.get("assigned_technician_id"),
+            external_cmms_id=canonical.get("external_cmms_id"),
+        )
+        self.twin_store.upsert_work_order(wo)
+        stats["work_orders_created"] += 1
+
+    def _load_service_provider(self, canonical: Dict, company_id: str, stats: Dict):
+        """Load a normalized service provider registry row."""
+        provider_id = canonical.get("provider_id", str(uuid.uuid4()))
+
+        trades = canonical.get("trades", [])
+        if isinstance(trades, str):
+            trades = [t.strip() for t in trades.split(",") if t.strip()]
+
+        regions = canonical.get("service_regions", [])
+        if isinstance(regions, str):
+            regions = [r.strip() for r in regions.split(",") if r.strip()]
+
+        provider = ServiceProviderTwin(
+            provider_id=provider_id,
+            company_id=company_id,
+            name=canonical.get("name", ""),
+            trades=trades,
+            service_regions=regions,
+            contract_type=canonical.get("contract_type", "t_and_m"),
+        )
+        self.twin_store.upsert_service_provider(provider)
+        stats["service_providers_created"] += 1
+
+    def _load_technician(self, canonical: Dict, company_id: str, stats: Dict):
+        """Load a normalized technician profile row."""
+        technician_id = canonical.get("technician_id", str(uuid.uuid4()))
+        provider_id = canonical.get("provider_id", "")
+
+        trades = canonical.get("trades", [])
+        if isinstance(trades, str):
+            trades = [t.strip() for t in trades.split(",") if t.strip()]
+
+        certs = canonical.get("certifications", [])
+        if isinstance(certs, str):
+            certs = [c.strip() for c in certs.split(",") if c.strip()]
+
+        locations = canonical.get("assigned_locations", [])
+        if isinstance(locations, str):
+            locations = [l.strip() for l in locations.split(",") if l.strip()]
+
+        tech = TechnicianProfile(
+            technician_id=technician_id,
+            provider_id=provider_id,
+            name=canonical.get("name", ""),
+            trades=trades,
+            certifications=certs,
+            assigned_locations=locations,
+        )
+        self.twin_store.upsert_technician(tech)
+        stats["technicians_created"] += 1

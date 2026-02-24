@@ -19,6 +19,8 @@ from enum import Enum
 import threading
 import json
 
+from shared.utils import optional_import
+
 from shared.agents.crewai_base import (
     DemandTwinAgent, CrewAIAgentConfig, AgentCategory, AgentRole,
     AgentRegistry, Crew, Task, Process, CREWAI_AVAILABLE
@@ -599,12 +601,14 @@ class PdMOrchestrator:
 
 def create_api_routes(orchestrator: PdMOrchestrator):
     """Create FastAPI routes for the orchestrator"""
-    try:
-        from fastapi import APIRouter, HTTPException
-        from pydantic import BaseModel
-    except ImportError:
+    fastapi_mod = optional_import("fastapi", feature_name="oil_gas_agent_routes", logger=logger)
+    pydantic_mod = optional_import("pydantic", feature_name="oil_gas_agent_routes", logger=logger)
+    if fastapi_mod is None or pydantic_mod is None:
         logger.warning("FastAPI not installed, API routes not available")
         return None
+    APIRouter = fastapi_mod.APIRouter
+    HTTPException = fastapi_mod.HTTPException
+    BaseModel = pydantic_mod.BaseModel
     
     router = APIRouter(prefix="/api/agents", tags=["agents"])
     

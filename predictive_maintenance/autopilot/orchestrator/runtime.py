@@ -5,6 +5,7 @@ Main execution engine for autopilot runs with durable checkpointing.
 """
 
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -331,9 +332,17 @@ class OrchestrationRuntime:
         session_factory: Callable[[], Session],
         connectors: Dict[str, Any] = None,
     ):
+        connectors = connectors or {}
         self.session_factory = session_factory
         self.checkpoint_mgr = CheckpointManager(session_factory)
-        self.approval_mgr = ApprovalManager(session_factory)
+        dev_mode = os.getenv("PDM_DEV_MODE", "").lower() in {"1", "true", "yes"}
+        if not dev_mode:
+            dev_mode = os.getenv("PDM_ENVIRONMENT", "development").lower() != "production"
+        self.approval_mgr = ApprovalManager(
+            session_factory,
+            notification_connector=connectors.get("notification"),
+            dev_mode=dev_mode,
+        )
         self.step_executor = StepExecutor(session_factory, connectors)
         self.playbook_registry = PlaybookRegistry(session_factory)
         self.evaluator = ExpressionEvaluator()
@@ -576,12 +585,56 @@ class OrchestrationRuntime:
     ) -> Optional[Tuple[str, str]]:
         """Handle step execution error"""
         context.errors.append(f"Step {step.id}: {error}")
-        
+
         on_error = step.on_error.value if hasattr(step.on_error, 'value') else step.on_error
-        
+
         if on_error == "RETRY":
-            # TODO: Implement retry logic
-            pass
+            import time
+
+            max_retries = max(0, int(getattr(step, "max_retries", 3) or 3))
+            base_backoff = float(step.params.get("retry_backoff_seconds", 1.0))
+            base_backoff = max(0.1, base_backoff)
+            retry_key = f"_retry_count:{step.id}"
+            attempted = int(context.variables.get(retry_key, 0))
+
+            if attempted < max_retries:
+                delay = min(base_backoff * (2 ** attempted), 30.0)
+                context.variables[retry_key] = attempted + 1
+                audit_entry = {
+                    "action_type": "RETRY_STEP",
+                    "step_id": step.id,
+                    "attempt": attempted + 1,
+                    "max_retries": max_retries,
+                    "backoff_seconds": round(delay, 3),
+                    "error": error,
+                    "executed_at": datetime.utcnow().isoformat(),
+                }
+                context.actions_taken.append(audit_entry)
+                logger.warning(
+                    "Retrying step %s for run %s (%d/%d) after %.2fs due to error: %s",
+                    step.id,
+                    context.run_id,
+                    attempted + 1,
+                    max_retries,
+                    delay,
+                    error,
+                )
+                time.sleep(min(delay, 5.0))
+                return None
+
+            logger.error(
+                "Step %s exceeded retry budget (%d retries), failing run %s",
+                step.id,
+                max_retries,
+                context.run_id,
+            )
+            self._update_run_status(
+                context.run_id,
+                RunStatus.FAILED,
+                "FAILED",
+                f"Step {step.id} exceeded retry budget after {max_retries} retries: {error}",
+            )
+            return "FAILED", f"Step {step.id} exceeded retry budget: {error}"
         elif on_error == "SKIP":
             logger.warning(f"Skipping failed step {step.id}")
             context.step_index += 1

@@ -1,7 +1,7 @@
 """Add approval queue and retraining request tables
 
 Revision ID: 003
-Revises: 002
+Revises: 002_autopilot
 Create Date: 2026-02-10
 
 """
@@ -10,7 +10,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 revision = "003"
-down_revision = "002"
+down_revision = "002_autopilot"
 branch_labels = None
 depends_on = None
 

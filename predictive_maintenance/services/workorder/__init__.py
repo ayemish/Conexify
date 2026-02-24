@@ -18,6 +18,16 @@ from .models import (
     ABTestResponse,
 )
 from .llm_service import WorkOrderLLMService, get_wo_llm_service
+from .tools import (
+    interpret_work_request,
+    auto_create_work_order,
+    prioritize_work_order,
+    match_service_providers,
+    recommend_cost_approval,
+    verify_repair_completion,
+    forecast_work_orders,
+    analyze_wo_ab_test,
+)
 
 __all__ = [
     "WorkOrder",
@@ -37,4 +47,13 @@ __all__ = [
     "ABTestResponse",
     "WorkOrderLLMService",
     "get_wo_llm_service",
+    # @tool wrappers
+    "interpret_work_request",
+    "auto_create_work_order",
+    "prioritize_work_order",
+    "match_service_providers",
+    "recommend_cost_approval",
+    "verify_repair_completion",
+    "forecast_work_orders",
+    "analyze_wo_ab_test",
 ]

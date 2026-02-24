@@ -5,8 +5,10 @@ Generates immutable audit-grade artifacts documenting autopilot runs.
 """
 
 import hashlib
+import io
 import json
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, List, Optional
@@ -228,18 +230,85 @@ class EvidencePackGenerator:
         start: datetime,
         end: datetime,
     ) -> Optional[TelemetryWindow]:
-        """
-        Build telemetry window from time-series data.
-        
-        In production, this would query the time-series database.
-        """
-        # Placeholder - would integrate with time-series storage
-        return TelemetryWindow(
-            start=start,
-            end=end,
-            points={},
-            summary={},
-        )
+        """Build telemetry window from persisted telemetry data."""
+        try:
+            from predictive_maintenance.persistence.models import TelemetryModel
+
+            session = self.session_factory()
+            try:
+                rows = (
+                    session.query(TelemetryModel)
+                    .filter(
+                        TelemetryModel.asset_id == asset_id,
+                        TelemetryModel.timestamp >= start,
+                        TelemetryModel.timestamp <= end,
+                    )
+                    .order_by(TelemetryModel.timestamp.asc())
+                    .all()
+                )
+            finally:
+                session.close()
+
+            point_fields = [
+                "compressor_current",
+                "compressor_power",
+                "suction_temp",
+                "discharge_temp",
+                "supply_air_temp",
+                "return_air_temp",
+                "ambient_temp",
+                "zone_temp",
+                "suction_pressure",
+                "discharge_pressure",
+                "superheat",
+                "subcool",
+                "setpoint",
+                "cooling_valve_pct",
+                "heating_valve_pct",
+                "damper_position_pct",
+            ]
+
+            points: Dict[str, List[Dict[str, Any]]] = {}
+            for row in rows:
+                ts_iso = row.timestamp.isoformat() if row.timestamp else None
+                for field_name in point_fields:
+                    raw_value = getattr(row, field_name, None)
+                    if raw_value is None:
+                        continue
+                    try:
+                        value = float(raw_value)
+                    except (TypeError, ValueError):
+                        continue
+                    points.setdefault(field_name, []).append(
+                        {"timestamp": ts_iso, "value": value}
+                    )
+
+            summary: Dict[str, Dict[str, float]] = {}
+            for field_name, values in points.items():
+                nums = [v["value"] for v in values]
+                if not nums:
+                    continue
+                summary[field_name] = {
+                    "min": min(nums),
+                    "max": max(nums),
+                    "avg": sum(nums) / max(len(nums), 1),
+                }
+
+            return TelemetryWindow(
+                start=start,
+                end=end,
+                points=points,
+                summary=summary,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Telemetry window retrieval failed for asset_id=%s window=(%s,%s): %s",
+                asset_id,
+                start.isoformat(),
+                end.isoformat(),
+                exc,
+            )
+            return TelemetryWindow(start=start, end=end, points={}, summary={})
     
     def _compute_hash(self, pack: EvidencePack) -> str:
         """Compute SHA-256 hash of pack content for immutability"""
@@ -341,18 +410,46 @@ class EvidencePackExporter:
         Returns:
             PDF content as bytes
         """
-        # Build PDF content using simple text-based approach
-        # In production, would use reportlab or weasyprint
-        
-        content = self._build_pdf_content(pack)
-        
-        # For now, return as text (would be PDF bytes in production)
-        pdf_bytes = content.encode('utf-8')
-        
+        dev_mode = os.getenv("PDM_DEV_MODE", "").lower() in {"1", "true", "yes"}
+        environment = os.getenv("PDM_ENVIRONMENT", "development").lower()
+        allow_text_fallback = dev_mode or environment != "production"
+
+        try:
+            from reportlab.lib.pagesizes import letter
+            from reportlab.pdfgen import canvas
+        except Exception as exc:
+            if not allow_text_fallback:
+                raise RuntimeError(
+                    "reportlab is required for evidence PDF export in non-dev environments"
+                ) from exc
+            logger.warning("reportlab unavailable; using dev text fallback for evidence export: %s", exc)
+            pdf_bytes = self._build_pdf_content(pack).encode("utf-8")
+            if output_path:
+                with open(output_path, "wb") as f:
+                    f.write(pdf_bytes)
+            return pdf_bytes
+
+        buffer = io.BytesIO()
+        c = canvas.Canvas(buffer, pagesize=letter)
+        width, height = letter
+        x = 48
+        y = height - 48
+
+        lines = self._build_pdf_content(pack).splitlines()
+        c.setFont("Helvetica", 10)
+        for line in lines:
+            if y < 48:
+                c.showPage()
+                c.setFont("Helvetica", 10)
+                y = height - 48
+            c.drawString(x, y, line[:160])
+            y -= 14
+
+        c.save()
+        pdf_bytes = buffer.getvalue()
         if output_path:
-            with open(output_path, 'wb') as f:
+            with open(output_path, "wb") as f:
                 f.write(pdf_bytes)
-        
         return pdf_bytes
     
     def _build_pdf_content(self, pack: EvidencePack) -> str:

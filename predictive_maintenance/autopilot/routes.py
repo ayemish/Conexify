@@ -34,6 +34,15 @@ def orchestrate_run(run_id: str):
         context = runtime.start_run(run_id)
         outcome, reason = runtime.execute_run(context)
 
+        if outcome in {"RESOLVED", "PARTIAL", "FAILED"}:
+            try:
+                from .verification.evidence import EvidencePackGenerator
+
+                generator = EvidencePackGenerator(session_factory)
+                generator.generate(run_id=run_id)
+            except Exception as evidence_err:
+                logger.warning("Evidence pack generation skipped for run %s: %s", run_id, evidence_err)
+
         logger.info(
             "Run %s finished: outcome=%s reason=%s",
             run_id, outcome, reason,
